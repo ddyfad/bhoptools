@@ -18,6 +18,11 @@ on:
         type: boolean
         required: false
         default: false
+      required_update:
+        description: "Required update: installed for everyone, even those who chose never to update (for fixes that can't wait, like signatures a game update broke)"
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   build:
@@ -70,10 +75,35 @@ jobs:
             client/linux/bhoptools
           if-no-files-found: error
 
-  # Run the workflow by hand with a release_tag to publish both builds as one release.
+  build-plugin:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        run: echo '#define BHOPTOOLS_VERSION "${{ inputs.release_tag }}"' > plugin/addons/sourcemod/scripting/bhoptools/version.sp
+
+      - name: Compile
+        run: |
+          set -e
+          curl -fsSL https://sm.alliedmods.net/smdrop/1.12/sourcemod-1.12.0-git7253-linux.tar.gz | tar xz
+          SM=$PWD/addons/sourcemod/scripting
+          mkdir out
+          (cd plugin/addons/sourcemod/scripting && $SM/spcomp64 bhoptools.sp -i$SM/include -iinclude -o$GITHUB_WORKSPACE/out/bhoptools.smx)
+          printf '{"version":"%s","size":%s,"sha256":"%s"}' "${{ inputs.release_tag }}" "$(stat -c %s out/bhoptools.smx)" "$(sha256sum out/bhoptools.smx | cut -d' ' -f1)" > out/manifest.json
+          cat out/manifest.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bhoptools-plugin
+          path: out/*
+          if-no-files-found: error
+
+  # Run the workflow by hand with a release_tag to publish the builds as one release.
   release:
     if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
-    needs: [build, build-linux]
+    needs: [build, build-linux, build-plugin]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -88,6 +118,11 @@ jobs:
           name: bhoptools-linux-x64
           path: dist/linux
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: bhoptools-plugin
+          path: dist/plugin
+
       # Artifacts lose the executable bit; the tarball keeps it.
       - name: Package
         run: |
@@ -98,6 +133,7 @@ jobs:
           chmod +x bhoptools-linux/bhoptools
           tar czf bhoptools-linux.tar.gz bhoptools-linux
           cp bhoptools-linux/* .
+          cp dist/plugin/bhoptools.smx dist/plugin/manifest.json .
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -110,7 +146,10 @@ jobs:
             bhoptools-linux.tar.gz
             bhoptools.so
             bhoptools
+            bhoptools.smx
+            manifest.json
           body: |
+            ${{ inputs.required_update && '[required]' || '' }}
             ${{ inputs.notes }}
 
             ---
@@ -121,6 +160,9 @@ jobs:
             Linux (64-bit CS:S):
             - Download `bhoptools-linux.tar.gz` (or `bhoptools.so` and `bhoptools`) and extract it somewhere without spaces or `:` in the path.
             - Run `./bhoptools` (`chmod +x` it first if you downloaded it on its own), and paste the launch options it prints into Steam.
+
+            Server:
+            - Put `bhoptools.smx` in `addons/sourcemod/plugins/`. It keeps itself up to date from these releases (needs the ripext extension); `sm_bhoptools_autoupdate 0` turns that off.
 
             Both:
             - Everything is switched on and off in Options → `Fixes`.
