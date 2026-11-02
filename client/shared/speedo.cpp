@@ -95,6 +95,7 @@ int    g_count, g_next;
 char   g_before[256], g_after[256];
 bool   g_twoD;
 bool   g_haveHud;
+bool   g_held;
 bool   g_enabled = true;
 double g_hudTime;
 double g_aliveTime = -1.0;
@@ -169,6 +170,10 @@ int FindSpeed(const char* text, const int* speed2d, const int* speed3d, int coun
 bool OnHint(const BfRead& msg)
 {
 	if (!g_enabled || !settings::Get().speedo) return false;
+	if (g_held) {
+		g_haveHud = false;
+		return false;
+	}
 	if (msg.curBit & 7) return false;
 	const int start = msg.curBit / 8;
 	char text[256];
@@ -435,6 +440,12 @@ void Dispatch(int id, const void* data, int len)
 	BfRead msg = { buf, len, len * 8, 0, false, false, "bhoptools" };
 	if (g_hudSlots && g_hudMsg < 0) g_hudMsg = MessageId("HudMsg");
 	CallOriginal(g_client, id, &msg);
+}
+
+void SetHeld(bool held)
+{
+	g_held = held;
+	if (held) g_haveHud = false;
 }
 
 void OnCommand(void* input, int sequence)

@@ -38,8 +38,9 @@ inline std::string JsonString(const std::string& json, const char* key, size_t* 
 }
 
 // Takes the /releases list (newest first) and returns the newest tag, or "" when `current`
-// is already the newest. `log` gets the notes of every release newer than `current`.
-inline std::string Changelog(const std::string& json, const std::string& current, std::string& log)
+// is already the newest. `log` gets the notes of every release newer than `current`. A release with
+// [required] in its notes sets *required: it's installed whatever the user chose before.
+inline std::string Changelog(const std::string& json, const std::string& current, std::string& log, bool* required = nullptr)
 {
 	std::string latest;
 	size_t pos = 0;
@@ -57,6 +58,14 @@ inline std::string Changelog(const std::string& json, const std::string& current
 		if (prerelease)
 			continue;
 		notes = notes.substr(0, notes.find("\n---"));
+		for (size_t mark; (mark = notes.find("[required]")) != std::string::npos;)
+		{
+			if (required)
+				*required = true;
+			notes.erase(mark, 10);
+		}
+		const size_t first = notes.find_first_not_of(" \n");
+		notes = first == std::string::npos ? "" : notes.substr(first);
 		notes.erase(notes.find_last_not_of(" \n") + 1);
 		if (notes.empty())
 			notes = "(no notes)";

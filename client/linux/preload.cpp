@@ -1052,7 +1052,7 @@ static void* UpdateThread(void*)
 	if (xdg && *xdg) snprintf(dir, sizeof(dir), "%s/bhoptools", xdg);
 	else snprintf(dir, sizeof(dir), "%s/.config/bhoptools", home);
 	snprintf(ignoreFile, sizeof(ignoreFile), "%s/no_update_check", dir);
-	if (access(ignoreFile, F_OK) == 0) return nullptr;
+	const bool ignored = access(ignoreFile, F_OK) == 0;
 
 	snprintf(jsonFile, sizeof(jsonFile), "%s/.cache", home);
 	mkdir(jsonFile, 0755);
@@ -1070,21 +1070,26 @@ static void* UpdateThread(void*)
 	}
 	unlink(jsonFile);
 	std::string changelog;
-	const std::string tag = Changelog(json, APP_VERSION, changelog);
-	if (tag.empty()) return nullptr;
+	bool required = false;
+	const std::string tag = Changelog(json, APP_VERSION, changelog, &required);
+	if (tag.empty() || (ignored && !required)) return nullptr;
 
-	const SDL_MessageBoxButtonData buttons[] = {
-		{ 1, 0, "Update" },
-		{ 2, 1, "Ignore" },
-		{ 0, 2, "Ignore forever" },
-	};
-	const int answer = ShowSDLMessageBox((tag + " is out, you have " APP_VERSION ".\n\nChangelog:\n\n" + changelog).c_str(), buttons, 3);
-	if (answer == 2) {
-		mkdir(dir, 0755);
-		if (FILE* f = fopen(ignoreFile, "w")) fclose(f);
-		return nullptr;
+	if (required) {
+		ShowSDLMessageBox(("A required update is being installed: " + tag + " (you have " APP_VERSION ").\n\nChangelog:\n\n" + changelog).c_str(), nullptr, 0);
+	} else {
+		const SDL_MessageBoxButtonData buttons[] = {
+			{ 1, 0, "Update" },
+			{ 2, 1, "Ignore" },
+			{ 0, 2, "Ignore forever" },
+		};
+		const int answer = ShowSDLMessageBox((tag + " is out, you have " APP_VERSION ".\n\nChangelog:\n\n" + changelog).c_str(), buttons, 3);
+		if (answer == 2) {
+			mkdir(dir, 0755);
+			if (FILE* f = fopen(ignoreFile, "w")) fclose(f);
+			return nullptr;
+		}
+		if (answer != 0) return nullptr;
 	}
-	if (answer != 0) return nullptr;
 
 	Dl_info info;
 	if (!dladdr((void*)&UpdateThread, &info) || !info.dli_fname) return nullptr;

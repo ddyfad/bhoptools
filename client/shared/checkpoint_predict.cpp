@@ -1889,6 +1889,12 @@ void Hooked_ProcessMovement(void* self, void* player, void* mv)
 				g_hold.slot = *s;
 				g_hold.slot.velocity = Field<Vec>(mv, MV_Velocity);
 			}
+			if (g_hold.active && g_hold.teleKey == key) {
+				Slot held = g_hold.slot;
+				held.velocity = Vec{ 0, 0, 0 };
+				held.movetype = MOVETYPE_NONE;
+				Restore(player, mv, held, kRestoreVelocity);
+			}
 			TeleportPredict_OnCheckpointTeleport();
 			TeleportPredict_OnCheckpointLoad(s->id, s->kz);
 			if (firstRun) {
@@ -1913,6 +1919,7 @@ void Hooked_ProcessMovement(void* self, void* player, void* mv)
 
 	if (observing) g_hold.active = false;
 	else if (g_hold.active && g_on && g_caps && key > g_hold.teleKey) ApplyHold(player, mv, key, firstRun, rawForward, rawSide);
+	speedo::SetHeld(g_hold.active && g_on && g_caps && key >= g_hold.teleKey && (!g_hold.released || key < g_hold.releaseKey));
 
 	// shavit sets the movetype in OnPlayerRunCmd, before the move, so this command already
 	// moves with it. It refuses while dead or spectating.

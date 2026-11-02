@@ -45,6 +45,8 @@ void SetEnabled(bool on);
 
 void OnMove(bool alive, const float velocity[3], bool firstRun);
 
+void SetHeld(bool held);
+
 // After CInput::CreateMove stored the command for `sequence`.
 void OnCommand(void* input, int sequence);
 

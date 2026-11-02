@@ -1022,8 +1022,7 @@ bool SelfUpdate()
 	GetEnvironmentVariableW(L"APPDATA", buf, MAX_PATH);
 	const std::wstring settingsDir = std::wstring(buf) + L"\\bhoptools";
 	const std::wstring ignoreFile = settingsDir + L"\\no_update_check";
-	if (GetFileAttributesW(ignoreFile.c_str()) != INVALID_FILE_ATTRIBUTES)
-		return false;
+	const bool ignored = GetFileAttributesW(ignoreFile.c_str()) != INVALID_FILE_ATTRIBUTES;
 
 	GetModuleFileNameW(NULL, buf, MAX_PATH);
 	const std::wstring self = buf;
@@ -1042,21 +1041,31 @@ bool SelfUpdate()
 	DeleteFileW(jsonFile.c_str());
 
 	std::string changelog;
-	const std::string tag = Changelog(json, APP_VERSION, changelog);
-	if (tag.empty())
+	bool required = false;
+	const std::string tag = Changelog(json, APP_VERSION, changelog, &required);
+	if (tag.empty() || (ignored && !required))
 		return false;
 
-	const std::string text = tag + " is out, you have " APP_VERSION ".\n\nChangelog:\n\n" + changelog + "\n\nYes: update now\nNo: ask again next time\nCancel: never check again (delete %APPDATA%\\bhoptools\\no_update_check to undo)";
 	wchar_t wtext[2048];
-	MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wtext, 2048);
-	const int answer = MessageBoxW(NULL, wtext, L"bhoptools update", MB_YESNOCANCEL | MB_ICONINFORMATION | MB_TOPMOST);
-	if (answer == IDCANCEL)
+	if (required)
 	{
-		CreateDirectoryW(settingsDir.c_str(), NULL);
-		CloseHandle(CreateFileW(ignoreFile.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL));
+		const std::string text = "A required update is being installed: " + tag + " (you have " APP_VERSION ").\n\nChangelog:\n\n" + changelog;
+		MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wtext, 2048);
+		MessageBoxW(NULL, wtext, L"bhoptools update", MB_OK | MB_ICONINFORMATION | MB_TOPMOST);
 	}
-	if (answer != IDYES)
-		return false;
+	else
+	{
+		const std::string text = tag + " is out, you have " APP_VERSION ".\n\nChangelog:\n\n" + changelog + "\n\nYes: update now\nNo: ask again next time\nCancel: never check again (delete %APPDATA%\\bhoptools\\no_update_check to undo)";
+		MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wtext, 2048);
+		const int answer = MessageBoxW(NULL, wtext, L"bhoptools update", MB_YESNOCANCEL | MB_ICONINFORMATION | MB_TOPMOST);
+		if (answer == IDCANCEL)
+		{
+			CreateDirectoryW(settingsDir.c_str(), NULL);
+			CloseHandle(CreateFileW(ignoreFile.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL));
+		}
+		if (answer != IDYES)
+			return false;
+	}
 
 	const std::wstring path = L"/ddyfad/bhoptools/releases/download/" + std::wstring(tag.begin(), tag.end()) + L"/bhoptools.exe";
 	char magic[2] = {};
