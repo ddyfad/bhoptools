@@ -39,6 +39,8 @@ HUD
 * `hud_speed`: the speed in shavit's center HUD comes from local prediction instead of the server.
 * `hud_keys`: shavit's key overlay (and bgs-jumpstats' showkeys) is drawn from your newest local command instead of a ping late.
 * bgs-jumpstats (jhud, trainer, offsets, speedometer, showyaws, showkeys, ssj) is worked out and drawn from your own commands, on servers whose jumpstats sends the settings for it.
+* betterseg's `!seg_freeze` hold after a checkpoint teleport is predicted (needs the bhoptools plugin and a betterseg with `BetterSeg_GetFreeze`), so you no longer move for a round trip before being pulled back.
+* HUD slots: every HUD message gets a slot of its own by what it is sent with (channel and position), instead of sharing the game's six HudMsg channels, where elements from different plugins overwrote each other and blinked. Done on the client, so it works on any server.
 * Toggles print a short message on screen (`prediction 1`, `Viewpunch: 0`, `BunnyhopAPE: 1`).
 
 Spectating

@@ -4,6 +4,7 @@
 #include <fstream>
 #include <functional>
 #include <string>
+#include <vector>
 #include <conio.h>
 #include <stdio.h>
 #include "utils.h"
@@ -916,6 +917,7 @@ std::string GetCSSPath(std::string const & steampath)
 {
 	std::ifstream libraryfolders(steampath + "\\steamapps\\libraryfolders.vdf");
 	std::string line, css_path, library_path;
+	std::vector<std::string> libraries = { steampath };
 	while (std::getline(libraryfolders, line))
 	{
 #define PPPPP "\t\t\"path\"\t\t\""
@@ -923,16 +925,24 @@ std::string GetCSSPath(std::string const & steampath)
 		{
 			library_path = line.substr(sizeof(PPPPP) - 1, line.size() - sizeof(PPPPP));
 			library_path = ReplaceString(library_path, "\\\\", "\\");
+			libraries.push_back(library_path);
 		}
 
-		if (line.rfind("\t\t\t\"240\"", 0) == 0)
-		{
+		if (css_path == "" && line.rfind("\t\t\t\"240\"", 0) == 0)
 			css_path = library_path;
-			break;
-		}
+	}
+	const char* const kRel = "\\steamapps\\common\\Counter-Strike Source\\";
+	auto has_game = [&](std::string const & lib) {
+		return GetFileAttributesA((lib + kRel + "cstrike_win64.exe").c_str()) != INVALID_FILE_ATTRIBUTES;
+	};
+	if (css_path == "" || !has_game(css_path))
+	{
+		css_path.clear();
+		for (auto const & lib : libraries)
+			if (has_game(lib)) { css_path = lib; break; }
 	}
 	if (css_path != "")
-		css_path += "\\steamapps\\common\\Counter-Strike Source\\";
+		css_path += kRel;
 	return css_path;
 }
 
@@ -948,6 +958,21 @@ DWORD ReadActiveProcess(const char* value)
 	DWORD v = 0, size = sizeof(v);
 	RegGetValueA(HKEY_CURRENT_USER, "SOFTWARE\\Valve\\Steam\\ActiveProcess", value, RRF_RT_REG_DWORD, NULL, &v, &size);
 	return v;
+}
+
+std::wstring ProcessCommandLine(HANDLE process)
+{
+	typedef LONG(NTAPI* NtQueryInformationProcessFn)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+	struct CommandLine { USHORT length, maxLength; PWSTR buffer; };
+	static auto query = (NtQueryInformationProcessFn)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationProcess");
+	if (!query) return L"";
+	ULONG len = 0;
+	query(process, 60, nullptr, 0, &len);
+	if (len < sizeof(CommandLine)) return L"";
+	std::vector<BYTE> buf(len);
+	if (query(process, 60, buf.data(), len, &len) < 0) return L"";
+	auto cl = (CommandLine*)buf.data();
+	return cl->buffer ? std::wstring(cl->buffer, cl->length / sizeof(WCHAR)) : L"";
 }
 
 DWORD FindGameProcess(DWORD not_pid)
@@ -1075,24 +1100,9 @@ int main()
 	printf("launchopt = %s\n", launch_options.c_str());
 	auto css_path = GetCSSPath(steam_path);
 	printf("css path  = %s\n\n", css_path.c_str());
-	auto css_exe = css_path + "cstrike_win64.exe";
-
-	PROCESS_INFORMATION pi = {};
-	STARTUPINFOA si = {};
-
-	// Started outside Steam, the game can restart itself through Steam, which drops this command line.
-	SetEnvironmentVariableA("SteamAppId", "240");
-	SetEnvironmentVariableA("SteamGameId", "240");
-	// The engine skips argv[0] when looking for flags, so the exe has to come first.
-	auto cmdline = "\"" + css_exe + "\" " + launch_options;
-	if (!CreateProcessA(css_exe.c_str(), (char*)cmdline.c_str(), NULL, NULL, FALSE, 0, NULL, css_path.c_str(), &si, &pi))
+	if (css_path.empty())
 	{
-		auto err = GetLastError();
-		char* buf;
-		FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&buf, 0, NULL);
-
-		printf("CreateProcessA failed (0x%x): %s\n", err, buf);
-
+		printf("Couldn't find Counter-Strike Source (cstrike_win64.exe) in any Steam library under %s.\nIs it installed? Press Enter to close.\n", steam_path.c_str());
 		while (1)
 		{
 			if (_kbhit() && _getch() == VK_RETURN)
@@ -1100,10 +1110,76 @@ int main()
 			Sleep(500);
 		}
 	}
+	auto css_exe = css_path + "cstrike_win64.exe";
 
-	LogTime("game process started");
-	HANDLE game = pi.hProcess;
-	DWORD game_pid = pi.dwProcessId;
+	HANDLE game = NULL;
+	DWORD game_pid = 0;
+
+	if (!FindGameProcess(0) && !getenv("BHOPTOOLS_DIRECT"))
+	{
+		PROCESS_INFORMATION spi = {};
+		STARTUPINFOA ssi = {};
+		auto steam_cmd = "\"" + steam_path + "\\steam.exe\" -applaunch 240 " + launch_options;
+		if (CreateProcessA(NULL, (char*)steam_cmd.c_str(), NULL, NULL, FALSE, 0, NULL, steam_path.c_str(), &ssi, &spi))
+		{
+			CloseHandle(spi.hThread);
+			CloseHandle(spi.hProcess);
+			LogTime("asked Steam to start the game");
+			for (int i = 0; i < 240 && !game; i++)
+			{
+				DWORD pid = FindGameProcess(0);
+				HANDLE h = pid ? OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid) : NULL;
+				if (h) { game = h; game_pid = pid; }
+				else Sleep(500);
+			}
+			if (game)
+				LogTime("game process started by Steam");
+			else
+				printf("Steam didn't start the game; starting it directly (no Steam overlay)\n");
+		}
+		if (game)
+		{
+			auto started_with = ProcessCommandLine(game);
+			if (!started_with.empty() && started_with.find(L"-insecure") == std::wstring::npos)
+			{
+				printf("Steam didn't pass the launch options on (no -insecure); starting the game directly (no Steam overlay)\n");
+				TerminateProcess(game, 0);
+				WaitForSingleObject(game, 10000);
+				CloseHandle(game);
+				game = NULL;
+				game_pid = 0;
+			}
+		}
+	}
+
+	if (!game)
+	{
+		PROCESS_INFORMATION pi = {};
+		STARTUPINFOA si = {};
+
+		SetEnvironmentVariableA("SteamAppId", "240");
+		SetEnvironmentVariableA("SteamGameId", "240");
+		auto cmdline = "\"" + css_exe + "\" " + launch_options;
+		if (!CreateProcessA(css_exe.c_str(), (char*)cmdline.c_str(), NULL, NULL, FALSE, 0, NULL, css_path.c_str(), &si, &pi))
+		{
+			auto err = GetLastError();
+			char* buf;
+			FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, err, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPSTR)&buf, 0, NULL);
+
+			printf("CreateProcessA failed (0x%x): %s\n", err, buf);
+
+			while (1)
+			{
+				if (_kbhit() && _getch() == VK_RETURN)
+					return 0;
+				Sleep(500);
+			}
+		}
+
+		LogTime("game process started");
+		game = pi.hProcess;
+		game_pid = pi.dwProcessId;
+	}
 	int handoff_wait = 0;
 	while (!GetModuleHandleExtern(game_pid, "client.dll"))
 	{

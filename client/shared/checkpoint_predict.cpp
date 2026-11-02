@@ -49,6 +49,7 @@ const int kServerKeys     = 1 << 12;
 const int kServerAutosync = 1 << 13;
 const int kServerZones    = 1 << 16;
 const int kServerTeleportView = 1 << 17;
+const int kServerHold = 1 << 18;
 // bhoptools_hello flags
 const int kClientTriggers = 1 << 0;
 const int kClientMenus    = 1 << 1;
@@ -67,6 +68,7 @@ const int kClientZones    = 1 << 15;
 const int kClientTeleportView = 1 << 16;
 const int kClientMenuSound = 1 << 17;
 const int kClientJumpstats = 1 << 18;
+const int kClientHold = 1 << 20;
 const int kMenuKeySave = 1 << 0;     // bhoptools_menu keys
 const int kMenuKeyTele = 1 << 1;
 const int kRestoreAngles   = 1 << 0;  // bhoptools_cpset, shavit's CP_ANGLES and CP_VELOCITY
@@ -175,7 +177,7 @@ int32_t g_frameX[kFrameBatch], g_frameY[kFrameBatch];
 int    g_capsCmd;        // saves after this command get acked
 int    g_serverFlags;
 bool   g_lastKz;
-int    g_clientFlags = kClientMenus | kClientRngfix | kClientAutobhop | kClientNoclip | kClientMove | kClientUntouch | kClientMsf | kClientState | kClientCpset | kClientKeys | kClientRestart | kClientAutosync | kClientZones | kClientTeleportView | kClientMenuSound | kClientJumpstats;
+int    g_clientFlags = kClientMenus | kClientRngfix | kClientAutobhop | kClientNoclip | kClientMove | kClientUntouch | kClientMsf | kClientState | kClientCpset | kClientKeys | kClientRestart | kClientAutosync | kClientZones | kClientTeleportView | kClientMenuSound | kClientJumpstats | kClientHold;
 NcLog  g_noclip;
 int    g_noclipAllow = NC_ALLOW_ALL;
 // Servers without bhoptools_cpset restore both.
@@ -187,6 +189,16 @@ bool g_autosyncMovesOnly;
 RsPredictor g_restart;
 // laggedmovement to put back once, where a restart we predicted set it and the server didn't.
 struct { bool pending; float from, to; } g_laggedFix;
+
+struct Hold {
+	bool active;
+	int  teleKey;
+	bool released;
+	int  releaseKey;
+	Slot slot;
+};
+Hold g_hold;
+bool g_holdArmed;
 
 bool   g_cpMenu;
 int    g_menuSlots;
@@ -274,7 +286,7 @@ float NormalizeAngle(float a)
 float ClampPitch(float p) { return p < -89.0f ? -89.0f : (p > 89.0f ? 89.0f : p); }
 
 // The engine keeps pointers to these for the whole process.
-const int kCmdCount = 44;
+const int kCmdCount = 45;
 ConCommandX g_cmds[kCmdCount];
 
 // IN_Impulse, so sm_save and sm_tele set the next usercmd's impulse like a bind.
@@ -368,6 +380,8 @@ void ResetZones()
 
 void ResetSession()
 {
+	g_hold = Hold();
+	g_holdArmed = false;
 	g_framesOn = false;
 	SetEventQueueFixIfChanged(false);
 	RngSettings rng = g_rng;
@@ -466,6 +480,8 @@ void Cmd_Caps(const CCommandX& c)
 	if (ArgInt(c, 1) < 2) {
 		g_caps = false;
 		g_framesOn = false;
+		g_hold = Hold();
+		g_holdArmed = false;
 		SetEventQueueFixIfChanged(false);
 		tp::SetUntouchEachCommand(false);
 		tp::SetMpbhopsLoaded(false);
@@ -485,6 +501,8 @@ void Cmd_Caps(const CCommandX& c)
 			if (g_slots[i].state != kConfirmed) RemoveSlot(&g_slots[i]);
 	g_caps = true;
 	g_capsCmd = ArgInt(c, 3);
+	g_hold = Hold();
+	g_holdArmed = false;
 	g_serverFlags = ArgInt(c, 4);
 	tp::SetUntouchEachCommand((g_serverFlags & kServerUntouch) != 0);
 	tp::SetMpbhopsLoaded((g_serverFlags & kServerMpbhops) != 0);
@@ -516,8 +534,9 @@ void Cmd_Caps(const CCommandX& c)
 	ResetZones();
 	TeleportPredict_WatchZones((g_serverFlags & kServerZones) != 0);
 	// Past what each packet backs up, the server runs the last command again for every one lost, which
-	// we never predict. 7 is the most a packet carries.
-	VFunc<void (*)(void*, const char*)>(g_engine, VT_IVEngineClient_ClientCmdUnrestricted)(g_engine, "cl_cmdbackup 7\n");
+	void* cvar = CreateInterfaceIn(VSTDLIB_MODULE, "VEngineCvar004");
+	if (cvar && VFunc<void* (*)(void*, const char*)>(cvar, VT_Cvar_FindBase)(cvar, "cl_cmdbackup"))
+		VFunc<void (*)(void*, const char*)>(g_engine, VT_IVEngineClient_ClientCmdUnrestricted)(g_engine, "cl_cmdbackup 7\n");
 }
 
 // Not through the engine: the trigger sim would drop an angle matching a teleport snap it awaits.
@@ -736,6 +755,12 @@ void Cmd_Keys(const CCommandX& c)
 {
 	if (c.argc < 5 || !g_caps || !(g_serverFlags & kServerKeys) || ArgInt(c, 1) != g_session) return;
 	g_keys.AddReport(ArgInt(c, 4), ArgInt(c, 2), ArgInt(c, 3));
+}
+
+void Cmd_Hold(const CCommandX& c)
+{
+	if (c.argc < 3 || !g_caps || !(g_serverFlags & kServerHold) || ArgInt(c, 1) != g_session) return;
+	g_holdArmed = ArgInt(c, 2) != 0;
 }
 
 // bhoptools_autosync <session> <command> <on> <AS_* order> <zero> [movesonly]
@@ -1389,6 +1414,7 @@ bool RegisterCommands()
 		{ "bhoptools_msf", "Sent by the bhoptools server plugin.", Cmd_Msf, FCVAR_SERVER_CAN_EXECUTE },
 		{ "bhoptools_cpset", "Sent by the bhoptools server plugin.", Cmd_Cpset, FCVAR_SERVER_CAN_EXECUTE },
 		{ "bhoptools_keys", "Sent by the bhoptools server plugin.", Cmd_Keys, FCVAR_SERVER_CAN_EXECUTE },
+		{ "bhoptools_hold", "Sent by the bhoptools server plugin.", Cmd_Hold, FCVAR_SERVER_CAN_EXECUTE },
 		{ "bhoptools_autosync", "Sent by the bhoptools server plugin.", Cmd_Autosync, FCVAR_SERVER_CAN_EXECUTE },
 		{ "bhoptools_ents", "Sent by the bhoptools server plugin.", Cmd_Ents, FCVAR_SERVER_CAN_EXECUTE },
 		{ "bhoptools_player", "Sent by the bhoptools server plugin.", Cmd_Player, FCVAR_SERVER_CAN_EXECUTE },
@@ -1621,6 +1647,22 @@ void Restore(void* player, void* mv, const Slot& s, int restore)
 	SetVelocity(player, vel);
 }
 
+void ApplyHold(void* player, void* mv, int key, bool firstRun, float forward, float side)
+{
+	Hold& h = g_hold;
+	if (!h.released && firstRun && (forward != 0.0f || side != 0.0f || !g_holdArmed)) {
+		h.released = true;
+		h.releaseKey = key;
+	}
+	if (h.released && key > h.releaseKey) return;
+	Slot s = h.slot;
+	if (!h.released || key < h.releaseKey) {
+		s.velocity = Vec{ 0, 0, 0 };
+		s.movetype = MOVETYPE_NONE;
+	}
+	Restore(player, mv, s, kRestoreVelocity);
+}
+
 void PushUndo(const Undo& u)
 {
 	if (g_undoCount == 8) { memmove(&g_undo[0], &g_undo[1], sizeof(Undo) * 7); g_undoCount--; }
@@ -1778,6 +1820,7 @@ void Hooked_ProcessMovement(void* self, void* player, void* mv)
 	const int impulse = Field<int>(mv, MV_Impulse);
 	const bool firstRun = (Field<uint8_t>(mv, MV_Flags) & 1) != 0;
 	const int key = CommandKey(player, mv);
+	const float rawForward = Field<float>(mv, MV_ForwardMove), rawSide = Field<float>(mv, MV_SideMove);
 	if (firstRun) MaybeHello();
 	if (g_laggedFix.pending) {
 		g_laggedFix.pending = false;
@@ -1839,6 +1882,13 @@ void Hooked_ProcessMovement(void* self, void* player, void* mv)
 		if (s && s->state != kUnknown) {
 			Restore(player, mv, *s, restore);
 			impulseTeleport = true;
+			if (g_on && (g_serverFlags & kServerHold) && g_holdArmed && !(g_hold.active && g_hold.teleKey == key)) {
+				g_hold = Hold();
+				g_hold.active = true;
+				g_hold.teleKey = key;
+				g_hold.slot = *s;
+				g_hold.slot.velocity = Field<Vec>(mv, MV_Velocity);
+			}
 			TeleportPredict_OnCheckpointTeleport();
 			TeleportPredict_OnCheckpointLoad(s->id, s->kz);
 			if (firstRun) {
@@ -1860,6 +1910,9 @@ void Hooked_ProcessMovement(void* self, void* player, void* mv)
 		if (firstRun) DecideShift(key, Field<Vec>(mv, MV_ViewAngles).y);
 		ApplyShift(mv, key);
 	}
+
+	if (observing) g_hold.active = false;
+	else if (g_hold.active && g_on && g_caps && key > g_hold.teleKey) ApplyHold(player, mv, key, firstRun, rawForward, rawSide);
 
 	// shavit sets the movetype in OnPlayerRunCmd, before the move, so this command already
 	// moves with it. It refuses while dead or spectating.

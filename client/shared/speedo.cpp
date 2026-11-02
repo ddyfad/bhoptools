@@ -34,6 +34,57 @@ void* UserMessages() { return g_userMessages; }
 int    g_hintMsg = -1;
 int    g_textMsg = -1;
 
+const int kHudExtraSlots = 10;
+const int kHudMessageBytes = 0x58;
+const int kHudNameOffset = 0x30;
+const int kHudTextOffset = 0x38;
+const int kHudTextBytes = 512;
+const int kVT_IVEngineClient_TextMessageGet = 10;
+static_assert(sizeof(void*) == 8, "client_textmessage_t layout is 64-bit");
+
+typedef void* (*TextMessageGetFn)(void*, const char*);
+TextMessageGetFn g_origTextMessageGet;
+void*  g_engineIface;
+bool   g_hudSlots;
+int    g_hudMsg = -1;
+int    g_hudVirtual = -1;
+alignas(16) unsigned char g_hudMessages[kHudExtraSlots][kHudMessageBytes];
+char   g_hudText[kHudExtraSlots][kHudTextBytes];
+
+void* Hooked_TextMessageGet(void* self, const char* name)
+{
+	if (g_hudVirtual >= 0 && name && !strncmp(name, "__NETMESSAGE__", 14)) return g_hudMessages[g_hudVirtual];
+	return g_origTextMessageGet(self, name);
+}
+
+bool InstallHudSlots()
+{
+	g_engineIface = CreateInterfaceIn(ENGINE_MODULE, "VEngineClient014");
+	if (!g_engineIface) return false;
+	void** vt = *reinterpret_cast<void***>(g_engineIface);
+	g_origTextMessageGet = reinterpret_cast<TextMessageGetFn>(vt[kVT_IVEngineClient_TextMessageGet]);
+	const unsigned char* m1 = static_cast<const unsigned char*>(g_origTextMessageGet(g_engineIface, "__NETMESSAGE__1"));
+	const unsigned char* m2 = static_cast<const unsigned char*>(g_origTextMessageGet(g_engineIface, "__NETMESSAGE__2"));
+	if (!m1 || !m2 || m2 - m1 != kHudMessageBytes || g_origTextMessageGet(g_engineIface, "__bhoptools_none__")) {
+		CoreLog("hud slots: IVEngineClient::TextMessageGet isn't where expected, HUD stays on six channels");
+		return false;
+	}
+	const char* name = *reinterpret_cast<const char* const*>(m1 + kHudNameOffset);
+	if (!name || strcmp(name, "__NETMESSAGE__1") || !*reinterpret_cast<void* const*>(m1 + kHudTextOffset)) {
+		CoreLog("hud slots: client_textmessage_t doesn't look as expected, HUD stays on six channels");
+		return false;
+	}
+	for (int i = 0; i < kHudExtraSlots; ++i) {
+		memcpy(g_hudMessages[i], m1, kHudMessageBytes);
+		*reinterpret_cast<char**>(g_hudMessages[i] + kHudTextOffset) = g_hudText[i];
+	}
+	if (!PatchPointer(&vt[kVT_IVEngineClient_TextMessageGet], reinterpret_cast<void*>(&Hooked_TextMessageGet))) {
+		CoreLog("hud slots: couldn't hook TextMessageGet, HUD stays on six channels");
+		return false;
+	}
+	return true;
+}
+
 const char* g_watchName;
 int    g_watchMsg = -1;
 void (*g_watchFn)(const BfRead&);
@@ -173,15 +224,88 @@ bool OnTextMsg(const BfRead& msg)
 	return true;
 }
 
+struct HudElement { bool used; int channel; float x, y; double expires, lastUse; };
+HudElement g_hudElements[kHudExtraSlots];
+
+struct HudFields { int channel, effect; float x, y, fadeIn, fadeOut, hold, fxTime; bool empty; };
+
+bool ParseHudMsg(const unsigned char* d, int bytes, HudFields& f)
+{
+	const int kHeader = 1 + 4 + 4 + 4 + 4 + 1 + 16;
+	if (bytes < kHeader + 1) return false;
+	f.channel = d[0];
+	memcpy(&f.x, d + 1, 4);
+	memcpy(&f.y, d + 5, 4);
+	f.effect = d[17];
+	memcpy(&f.fadeIn, d + 18, 4);
+	memcpy(&f.fadeOut, d + 22, 4);
+	memcpy(&f.hold, d + 26, 4);
+	memcpy(&f.fxTime, d + 30, 4);
+	f.empty = d[kHeader] == 0;
+	return true;
+}
+
+bool RunHudHandler(void* self, int type, const BfRead* msg, int at, int slot)
+{
+	unsigned char buf[608] = {};
+	memcpy(buf, msg->data, msg->bytes);
+	buf[at] = 0;
+	BfRead copy = *msg;
+	copy.data = buf;
+	g_hudVirtual = slot;
+	const bool handled = g_orig(self, type, &copy);
+	g_hudVirtual = -1;
+	g_hudText[slot][kHudTextBytes - 1] = '\0';
+	return handled;
+}
+
+bool CallOriginal(void* self, int type, BfRead* msg)
+{
+	if (g_hudSlots && g_hudMsg >= 0 && type == g_hudMsg && msg && !(msg->curBit & 7) && msg->bytes > 0 && msg->bytes <= 600) {
+		const int at = msg->curBit / 8;
+		HudFields f;
+		if (at < msg->bytes && ParseHudMsg(msg->data + at, msg->bytes - at, f)) {
+			const double now = MonotonicSeconds();
+			if (f.empty) {
+				for (int i = 0; i < kHudExtraSlots; ++i) {
+					if (g_hudElements[i].used && g_hudElements[i].channel == f.channel) {
+						g_hudElements[i].used = false;
+						RunHudHandler(self, type, msg, at, i);
+					}
+				}
+				return true;
+			}
+			int slot = -1, freeSlot = -1, oldest = 0;
+			for (int i = 0; i < kHudExtraSlots && slot < 0; ++i) {
+				const HudElement& e = g_hudElements[i];
+				if (e.used && e.channel == f.channel && fabsf(e.x - f.x) < 0.0005f && fabsf(e.y - f.y) < 0.0005f) slot = i;
+				else if (freeSlot < 0 && (!e.used || e.expires < now)) freeSlot = i;
+				if (e.lastUse < g_hudElements[oldest].lastUse) oldest = i;
+			}
+			if (slot < 0) slot = freeSlot >= 0 ? freeSlot : oldest;
+			HudElement& e = g_hudElements[slot];
+			e.used = true;
+			e.channel = f.channel;
+			e.x = f.x;
+			e.y = f.y;
+			e.lastUse = now;
+			e.expires = now + f.fadeIn + f.hold + f.fadeOut + 0.25;
+			return RunHudHandler(self, type, msg, at, slot);
+		}
+	}
+	return g_orig(self, type, msg);
+}
+
 bool Hooked_Dispatch(void* self, int type, BfRead* msg)
 {
 	if (g_hintMsg < 0) g_hintMsg = MessageId("HintText");
 	if (g_textMsg < 0) g_textMsg = MessageId("TextMsg");
+	if (g_hudSlots && g_hudMsg < 0) g_hudMsg = MessageId("HudMsg");
 	if (g_watchFn && g_watchMsg < 0) g_watchMsg = MessageId(g_watchName);
 	if (msg && g_watchFn && type == g_watchMsg) g_watchFn(*msg);
 	if (msg && g_hintMsg >= 0 && type == g_hintMsg && OnHint(*msg)) return true;
 	if (msg && g_textMsg >= 0 && type == g_textMsg && OnTextMsg(*msg)) return true;
-	return g_orig(self, type, msg);
+	return CallOriginal(self, type, msg);
 }
 
 void SettingCmd(const CCommandX& c, bool Settings::* value, const char* name)
@@ -253,17 +377,23 @@ void Attach(void* client)
 		g_userMessages = nullptr;
 		CoreLog("speedo: couldn't hook DispatchUserMessage, HUD speed stays as the server sends it");
 	}
+	const bool hooked = g_userMessages != nullptr;
 #else
 	g_userMessages = *reinterpret_cast<void* const*>(fn + 7 + disp);
-	if (!g_userMessages || !PatchPointer(&vt[VT_Client_DispatchUserMessage], reinterpret_cast<void*>(&Hooked_Dispatch)))
+	const bool hooked = g_userMessages && PatchPointer(&vt[VT_Client_DispatchUserMessage], reinterpret_cast<void*>(&Hooked_Dispatch));
+	if (!hooked)
 		CoreLog("speedo: couldn't hook DispatchUserMessage, HUD speed stays as the server sends it");
 #endif
+	if (hooked)
+		g_hudSlots = InstallHudSlots();
 }
 
 #ifdef _WIN32
 void Detach()
 {
 	if (g_userMessages) PatchPointer(&(*reinterpret_cast<void***>(g_client))[VT_Client_DispatchUserMessage], reinterpret_cast<void*>(g_orig));
+	if (g_hudSlots) PatchPointer(&(*reinterpret_cast<void***>(g_engineIface))[kVT_IVEngineClient_TextMessageGet], reinterpret_cast<void*>(g_origTextMessageGet));
+	g_hudSlots = false;
 	g_userMessages = nullptr;
 }
 #endif
@@ -303,7 +433,8 @@ void Dispatch(int id, const void* data, int len)
 	if (!g_orig || !UserMessages() || id < 0 || len <= 0 || len > 512) return;
 	memcpy(buf, data, len);
 	BfRead msg = { buf, len, len * 8, 0, false, false, "bhoptools" };
-	g_orig(g_client, id, &msg);
+	if (g_hudSlots && g_hudMsg < 0) g_hudMsg = MessageId("HudMsg");
+	CallOriginal(g_client, id, &msg);
 }
 
 void OnCommand(void* input, int sequence)

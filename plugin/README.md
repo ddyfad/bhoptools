@@ -197,6 +197,18 @@ After `bhoptools_caps` they also get the entities Haze leaves alone, in parts:
 bhoptools_lfskip <session> <total> <offset> <entity>...
 ```
 
+## Hold after teleport (betterseg)
+
+[betterseg](https://github.com/dowoge/better-seg)'s `!seg_freeze` holds a player at the checkpoint after a teleport: every command it teleports them back with no velocity and `MOVETYPE_NONE`, until a command with forward or side movement releases them with the checkpoint's velocity. A client that doesn't know keeps predicting the movement and is pulled back a round trip later.
+
+The hello response has capability flag 262144 (`CAPS_HOLD`) when betterseg is loaded with the `BetterSeg_GetFreeze` and `BetterSeg_SetPredictedHold` natives. Clients that set hello flag 1048576 get, after `bhoptools_caps` and whenever it changes (checked after every command):
+
+```
+bhoptools_hold <session> <armed> <command>
+```
+
+`<armed>`: 1 when a teleport now would be held: the player has freeze on, the timer is started (not stopped, more than five ticks old) and not paused. The client then holds after a checkpoint teleport it predicts: from the next command it puts the player back at the checkpoint with no velocity and `MOVETYPE_NONE`, and on the first command with forward or side movement (read before key blocking), or once `<armed>` goes to 0, it restores the checkpoint's velocity and movetype for that command. For these clients the plugin also calls `BetterSeg_SetPredictedHold(client, true)`, which stops betterseg ramping their speed after the release (that only hid the round trip this removes).
+
 ## Touch links
 
 The engine ends a player's stale touch links (`PhysicsCheckForEntityUntouch`, which fires the triggers' `EndTouch`) once per server frame, after all the commands that arrived in that frame, and shavit-core again around each move. Which command's `OnEndTouch` a booster's output follows then depends on how the network grouped packets, which the client can't predict. For clients that set hello flag 64 the plugin calls `PhysicsCheckForEntityUntouch` in `OnPlayerRunCmdPost` of every command (after its touch pass, PostThink and an impulse save), so the outputs always follow the command that left the trigger. The call comes from shavit's gamedata (`shavit.games`, `PhysicsCheckForEntityUntouch`); the hello response has capability flag 64 (`CAPS_UNTOUCH`) when it was found.

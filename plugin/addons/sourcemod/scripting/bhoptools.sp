@@ -59,6 +59,7 @@ public Plugin myinfo =
 #include "bhoptools/mapdiff.sp"
 #include "bhoptools/zones.sp"
 #include "bhoptools/teleportview.sp"
+#include "bhoptools/hold.sp"
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
@@ -73,6 +74,8 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 	MarkNativeAsOptional("Shavit_GetRestartPosition");
 	MarkNativeAsOptional("Shavit_ShouldDisplayStopWarning");
 	MarkNativeAsOptional("Shavit_GetNoclipAccess");
+	MarkNativeAsOptional("BetterSeg_GetFreeze");
+	MarkNativeAsOptional("BetterSeg_SetPredictedHold");
 	Frames_AskPluginLoad2();
 	CreateNative("Bhoptools_GetClientFlags", Native_GetClientFlags);
 	CreateNative("Bhoptools_GetSession", Native_GetSession);
@@ -181,6 +184,7 @@ public void OnPluginStart()
 public void OnAllPluginsLoaded()
 {
 	gB_SuperLandfix = LibraryExists("superlandfix");
+	gB_Betterseg = LibraryExists("betterseg");
 	gCV_MaxCPSegmented = FindConVar("shavit_checkpoints_maxcp_seg");
 	gCV_MaxCP = FindConVar("shavit_checkpoints_maxcp");
 	FindNoclipCvars();
@@ -219,6 +223,7 @@ public void OnClientPutInServer(int client)
 	gB_NoclipCaps[client] = false;
 	gI_SentNoclip[client] = -1;
 	gI_SentLandfix[client] = -1;
+	gI_SentHold[client] = -1;
 	gI_SentKeys[client] = -1;
 	gI_SentAutosync[client] = -1;
 	gB_SyncOff[client] = false;
@@ -283,6 +288,11 @@ public void OnLibraryRemoved(const char[] name)
 		gB_SuperLandfix = false;
 	}
 
+	if (StrEqual(name, "betterseg"))
+	{
+		gB_Betterseg = false;
+	}
+
 	if (StrEqual(name, "shavit-zones"))
 	{
 		gB_Zones = false;
@@ -294,6 +304,11 @@ public void OnLibraryAdded(const char[] name)
 	if (StrEqual(name, "superlandfix"))
 	{
 		gB_SuperLandfix = true;
+	}
+
+	if (StrEqual(name, "betterseg"))
+	{
+		gB_Betterseg = true;
 	}
 
 	if (StrEqual(name, "shavit-zones"))
@@ -361,7 +376,7 @@ public Action Command_Hello(int client, int args)
 	{
 		gB_NoclipCaps[client] = NoclipAvailable();
 		gB_RestartCaps[client] = RestartAvailable();
-		int caps = CAPS_PREVNEXT | CAPS_RNGFIX | CAPS_AUTOBHOP | CAPS_MOVE | (LibraryExists("eventqueuefix") ? CAPS_EVENTQUEUEFIX : 0) | (gB_NoclipCaps[client] ? CAPS_NOCLIP : 0) | (gH_Untouch != null ? CAPS_UNTOUCH : 0) | CAPS_MSF | (MpbhopsLoaded() ? CAPS_MPBHOPS : 0) | CAPS_STATE | CAPS_CPSET | (gB_RestartCaps[client] ? CAPS_RESTART : 0) | CAPS_KEYS | (gH_TeleportHook != null ? CAPS_AUTOSYNC : 0) | (gB_Mapdiff ? CAPS_MAPDIFF : 0) | (gB_Zones ? CAPS_ZONES : 0) | (gH_TeleportHook != null ? CAPS_TELEPORT_VIEW : 0);
+		int caps = CAPS_PREVNEXT | CAPS_RNGFIX | CAPS_AUTOBHOP | CAPS_MOVE | (LibraryExists("eventqueuefix") ? CAPS_EVENTQUEUEFIX : 0) | (gB_NoclipCaps[client] ? CAPS_NOCLIP : 0) | (gH_Untouch != null ? CAPS_UNTOUCH : 0) | CAPS_MSF | (MpbhopsLoaded() ? CAPS_MPBHOPS : 0) | CAPS_STATE | CAPS_CPSET | (gB_RestartCaps[client] ? CAPS_RESTART : 0) | CAPS_KEYS | (gH_TeleportHook != null ? CAPS_AUTOSYNC : 0) | (gB_Mapdiff ? CAPS_MAPDIFF : 0) | (gB_Zones ? CAPS_ZONES : 0) | (gH_TeleportHook != null ? CAPS_TELEPORT_VIEW : 0) | (BetterSegAvailable() ? CAPS_HOLD : 0);
 		ClientCommand(client, "bhoptools_caps %d %d %d %d %d %d", PROTO, session, gI_LastCmd[client], caps, client, GetUserMessageId("SayText2"));
 		Frames_OnHello(client, session);
 		Debug(client, "caps sent, server flags %d", caps);
@@ -374,6 +389,7 @@ public Action Command_Hello(int client, int args)
 		gS_SentRestart[client][0] = 0;
 		gI_SentLandfix[client] = -1;
 		gI_SentKeys[client] = -1;
+		gI_SentHold[client] = -1;
 		gI_SentAutosync[client] = -1;
 		gI_SentTotal[client] = -1;
 		gB_StateDump[client] = true;
@@ -589,6 +605,7 @@ public void OnPlayerRunCmdPost(int client, int buttons, int impulse, const float
 
 	SendMove(client, cmdnum);
 	SendKeys(client, cmdnum);
+	SendHold(client, cmdnum);
 	SendAutosync(client, cmdnum);
 	SendZonePlayer(client, cmdnum);
 	ResendDoorsOnUse(client, buttons);

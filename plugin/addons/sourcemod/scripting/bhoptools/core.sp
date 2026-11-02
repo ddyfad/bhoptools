@@ -32,6 +32,7 @@
 #define CAPS_MAPDIFF       (1 << 14)
 #define CAPS_ZONES         (1 << 16)
 #define CAPS_TELEPORT_VIEW (1 << 17)
+#define CAPS_HOLD          (1 << 18)
 
 #define CLIENT_PREDICTS_TRIGGER_TELEPORTS (1 << 0)
 #define CLIENT_CPMENU (1 << 1)
@@ -49,6 +50,7 @@
 #define CLIENT_ZONES (1 << 15)
 #define CLIENT_TELEPORT_VIEW (1 << 16)
 #define CLIENT_MENU_SOUND (1 << 17)
+#define CLIENT_HOLD (1 << 20)
 
 // CPlayerState::fixangle, from pl.deadflag, 32-bit only
 #define FIXANGLE_OFFSET 20
