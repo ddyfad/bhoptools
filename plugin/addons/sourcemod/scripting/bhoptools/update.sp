@@ -140,7 +140,7 @@ void Update_Check(bool force = false)
 	HTTPClient client = new HTTPClient(base);
 	client.SetHeader("User-Agent", "bhoptools-plugin");
 	client.Timeout = 30;
-	client.Get("ddyfad/bhoptools/releases/latest/download/manifest.json", Update_OnManifest);
+	client.Get("ddyfad/bhoptools/releases/download/plugin/manifest.json", Update_OnManifest);
 	delete client;
 }
 
@@ -175,7 +175,7 @@ public void Update_OnManifest(HTTPResponse response, any value, const char[] err
 
 	char path[PLATFORM_MAX_PATH], endpoint[160], base[128];
 	UpdatePath(path, sizeof(path), ".new");
-	Format(endpoint, sizeof(endpoint), "ddyfad/bhoptools/releases/download/%s/bhoptools.smx", version);
+	Format(endpoint, sizeof(endpoint), "ddyfad/bhoptools/releases/download/plugin/bhoptools-%s.smx", version);
 	gCV_UpdateUrl.GetString(base, sizeof(base));
 	HTTPClient client = new HTTPClient(base);
 	client.SetHeader("User-Agent", "bhoptools-plugin");
