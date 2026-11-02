@@ -5,21 +5,33 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      target:
+        description: "What to publish: client (the exe and the Linux build), plugin (the SourceMod plugin) or both"
+        type: choice
+        options:
+          - client
+          - plugin
+          - both
+        default: client
       release_tag:
-        description: "Publish a release with this tag (e.g. v1.3); leave empty to only build"
+        description: "Client version to publish (e.g. 1.3). Leave empty to only build, or when publishing only the plugin"
+        required: false
+        default: ""
+      plugin_version:
+        description: "Plugin version to publish (e.g. 7). Leave empty to use the client version when publishing both"
         required: false
         default: ""
       notes:
-        description: "Release notes, shown in the update popup"
+        description: "Client release notes, shown in the update popup"
         required: false
         default: ""
       prerelease:
-        description: "Mark the release as a pre-release"
+        description: "Mark the client release as a pre-release"
         type: boolean
         required: false
         default: false
       required_update:
-        description: "Required update: installed for everyone, even those who chose never to update (for fixes that can't wait, like signatures a game update broke)"
+        description: "Required client update: installed for everyone, even those who chose never to update (for fixes that can't wait, like signatures a game update broke)"
         type: boolean
         required: false
         default: false
@@ -35,7 +47,7 @@ jobs:
       - uses: microsoft/setup-msbuild@v2
 
       - name: Set version
-        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != '' && inputs.target != 'plugin'
         shell: bash
         run: echo '#define APP_VERSION "${{ inputs.release_tag }}"' > client/shared/version.h
 
@@ -58,7 +70,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Set version
-        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != '' && inputs.target != 'plugin'
         run: echo '#define APP_VERSION "${{ inputs.release_tag }}"' > client/shared/version.h
 
       - name: Build
@@ -77,12 +89,22 @@ jobs:
 
   build-plugin:
     runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set version
-        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
-        run: echo '#define BHOPTOOLS_VERSION "${{ inputs.release_tag }}"' > plugin/addons/sourcemod/scripting/bhoptools/version.sp
+      - name: Work out the plugin version
+        id: version
+        run: |
+          set -e
+          V=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.target }}" != "client" ]; then
+            V="${{ inputs.plugin_version }}"
+            if [ -z "$V" ] && [ "${{ inputs.target }}" = "both" ]; then V="${{ inputs.release_tag }}"; fi
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if [ -n "$V" ]; then echo "#define BHOPTOOLS_VERSION \"$V\"" > plugin/addons/sourcemod/scripting/bhoptools/version.sp; fi
 
       - name: Compile
         run: |
@@ -91,8 +113,12 @@ jobs:
           SM=$PWD/addons/sourcemod/scripting
           mkdir out
           (cd plugin/addons/sourcemod/scripting && $SM/spcomp64 bhoptools.sp -i$SM/include -iinclude -o$GITHUB_WORKSPACE/out/bhoptools.smx)
-          printf '{"version":"%s","size":%s,"sha256":"%s"}' "${{ inputs.release_tag }}" "$(stat -c %s out/bhoptools.smx)" "$(sha256sum out/bhoptools.smx | cut -d' ' -f1)" > out/manifest.json
-          cat out/manifest.json
+          V="${{ steps.version.outputs.version }}"
+          if [ -n "$V" ]; then
+            cp out/bhoptools.smx "out/bhoptools-$V.smx"
+            printf '{"version":"%s","size":%s,"sha256":"%s"}' "$V" "$(stat -c %s out/bhoptools.smx)" "$(sha256sum out/bhoptools.smx | cut -d' ' -f1)" > out/manifest.json
+            cat out/manifest.json
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -100,10 +126,10 @@ jobs:
           path: out/*
           if-no-files-found: error
 
-  # Run the workflow by hand with a release_tag to publish the builds as one release.
-  release:
-    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
-    needs: [build, build-linux, build-plugin]
+  # Run the workflow by hand with target client (or both) and a release_tag to publish the client.
+  release-client:
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != '' && inputs.target != 'plugin'
+    needs: [build, build-linux]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -118,11 +144,6 @@ jobs:
           name: bhoptools-linux-x64
           path: dist/linux
 
-      - uses: actions/download-artifact@v4
-        with:
-          name: bhoptools-plugin
-          path: dist/plugin
-
       # Artifacts lose the executable bit; the tarball keeps it.
       - name: Package
         run: |
@@ -133,7 +154,6 @@ jobs:
           chmod +x bhoptools-linux/bhoptools
           tar czf bhoptools-linux.tar.gz bhoptools-linux
           cp bhoptools-linux/* .
-          cp dist/plugin/bhoptools.smx dist/plugin/manifest.json .
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -146,8 +166,6 @@ jobs:
             bhoptools-linux.tar.gz
             bhoptools.so
             bhoptools
-            bhoptools.smx
-            manifest.json
           body: |
             ${{ inputs.required_update && '[required]' || '' }}
             ${{ inputs.notes }}
@@ -161,10 +179,47 @@ jobs:
             - Download `bhoptools-linux.tar.gz` (or `bhoptools.so` and `bhoptools`) and extract it somewhere without spaces or `:` in the path.
             - Run `./bhoptools` (`chmod +x` it first if you downloaded it on its own), and paste the launch options it prints into Steam.
 
-            Server:
-            - Put `bhoptools.smx` in `addons/sourcemod/plugins/`. It keeps itself up to date from these releases (needs the ripext extension); `sm_bhoptools_autoupdate 0` turns that off.
+            Server plugin:
+            - Get `bhoptools.smx` from the [plugin release](https://github.com/ddyfad/bhoptools/releases/tag/plugin). It keeps itself up to date from there.
 
             Both:
             - Everything is switched on and off in Options → `Fixes`.
             - `F5` autohop prediction (Windows), `F7` viewpunch remover, `F8` pingfix (client-side prediction of triggers, rngfix and the HUD speed).
             - On servers running the [bhoptools plugin](https://github.com/ddyfad/bhoptools): checkpoints, noclip, restarts, shavit runspeed, landfix, easybhop, style key blocking, shavit-syncstyle autosync and momsurffix2 predicted, mpbhops_but_working doors, and the map state synced from the server.
+
+  # Run the workflow by hand with target plugin (or both) to publish the plugin. It goes to a single
+  # pre-release tagged "plugin", which the client's updater ignores; the plugin reads manifest.json from it.
+  release-plugin:
+    if: github.event_name == 'workflow_dispatch' && needs.build-plugin.outputs.version != ''
+    needs: [build-plugin]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bhoptools-plugin
+          path: dist/plugin
+
+      - name: Package
+        run: |
+          set -e
+          cp dist/plugin/bhoptools.smx dist/plugin/manifest.json "dist/plugin/bhoptools-${{ needs.build-plugin.outputs.version }}.smx" .
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: plugin
+          target_commitish: ${{ github.sha }}
+          name: plugin
+          prerelease: true
+          make_latest: false
+          files: |
+            bhoptools.smx
+            bhoptools-${{ needs.build-plugin.outputs.version }}.smx
+            manifest.json
+          body: |
+            The SourceMod plugin, currently version ${{ needs.build-plugin.outputs.version }}.
+
+            - First install: put `bhoptools.smx` in `addons/sourcemod/plugins/`. After that it updates itself from this release (needs the ripext extension).
+            - `sm_bhoptools_autoupdate 0` turns that off, `sm_bhoptools_checkupdate` checks now.
+            - This is a pre-release on purpose, so the client's updater ignores it.
