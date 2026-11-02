@@ -36,12 +36,12 @@ void SendHold(int client, int cmdnum)
 		}
 	}
 
-	if (!predicted)
+	if (!gB_Predicting[client] || gI_Proto[client] < 2 || !(gI_ClientFlags[client] & CLIENT_HOLD))
 	{
 		return;
 	}
 
-	int armed = HoldArmed(client) ? 1 : 0;
+	int armed = (predicted && HoldArmed(client)) ? 1 : 0;
 
 	if (armed != gI_SentHold[client])
 	{

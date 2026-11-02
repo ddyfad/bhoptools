@@ -12,6 +12,7 @@
 #define REQUIRE_PLUGIN
 #undef REQUIRE_EXTENSIONS
 #include <clientprefs>
+#include <ripext>
 #define REQUIRE_EXTENSIONS
 
 // Natives a patched shavit can add; stock shavit has none of them, and bhoptools works out the same
@@ -33,16 +34,20 @@ enum
 #pragma semicolon 1
 #pragma newdecls required
 
+#include "bhoptools/version.sp"
+
 public Plugin myinfo =
 {
 	name = "bhoptools",
 	author = "daf",
 	description = "Server side of client-predicted checkpoint saves, teleports, noclip and restarts",
-	version = "1.0",
+	version = BHOPTOOLS_VERSION,
 	url = "https://github.com/ddyfad/bhoptools"
 };
 
 #include "bhoptools/core.sp"
+#include "bhoptools/sha256.sp"
+#include "bhoptools/update.sp"
 #include "bhoptools/frames.sp"
 #include "bhoptools/checkpoints.sp"
 #include "bhoptools/autobhop.sp"
@@ -86,6 +91,7 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 public void OnPluginStart()
 {
 	RegConsoleCmd("bhoptools_hello", Command_Hello);
+	Update_OnPluginStart();
 	RegConsoleCmd("bhoptools_resync", Command_Resync);
 	Frames_OnPluginStart();
 	gH_OnClientFlags = new GlobalForward("Bhoptools_OnClientFlags", ET_Ignore, Param_Cell, Param_Cell);
@@ -203,6 +209,7 @@ public void OnConfigsExecuted()
 {
 	UpdateRngfix();
 	UpdateMsf();
+	Update_OnConfigsExecuted();
 }
 
 public void OnClientPutInServer(int client)

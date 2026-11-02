@@ -207,7 +207,7 @@ The hello response has capability flag 262144 (`CAPS_HOLD`) when betterseg is lo
 bhoptools_hold <session> <armed> <command>
 ```
 
-`<armed>`: 1 when a teleport now would be held: the player has freeze on, the timer is started (not stopped, more than five ticks old) and not paused. The client then holds after a checkpoint teleport it predicts: from the next command it puts the player back at the checkpoint with no velocity and `MOVETYPE_NONE`, and on the first command with forward or side movement (read before key blocking), or once `<armed>` goes to 0, it restores the checkpoint's velocity and movetype for that command. For these clients the plugin also calls `BetterSeg_SetPredictedHold(client, true)`, which stops betterseg ramping their speed after the release (that only hid the round trip this removes).
+`<armed>`: 1 when a teleport now would be held: the player has freeze on, the timer is started (not stopped, more than five ticks old) and not paused. The client then holds after a checkpoint teleport it predicts: from the teleport command itself it holds the player at the checkpoint with no velocity and `MOVETYPE_NONE` (betterseg sets `MOVETYPE_NONE` right after the teleport for these clients, so the teleport command doesn't move either), and on the first command with forward or side movement (read before key blocking), or once `<armed>` goes to 0, it restores the checkpoint's velocity and movetype for that command. For these clients the plugin also calls `BetterSeg_SetPredictedHold(client, true)`, which stops betterseg ramping their speed after the release (that only hid the round trip this removes).
 
 ## Touch links
 

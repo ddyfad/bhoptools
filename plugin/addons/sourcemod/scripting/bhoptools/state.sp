@@ -86,6 +86,7 @@ int gI_SlotWait[MAX_SYNC];
 public void OnMapEnd()
 {
 	ResetSync();
+	Update_OnMapEnd();
 }
 
 void ResetSync()
