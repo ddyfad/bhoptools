@@ -1,0 +1,3 @@
+[submodule "client/windows/Detours"]
+	path = client/windows/Detours
+	url = https://github.com/microsoft/Detours.git

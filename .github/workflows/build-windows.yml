@@ -1,0 +1,128 @@
+name: Build (Windows x64, Linux x64)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Publish a release with this tag (e.g. v1.3); leave empty to only build"
+        required: false
+        default: ""
+      notes:
+        description: "Release notes, shown in the update popup"
+        required: false
+        default: ""
+      prerelease:
+        description: "Mark the release as a pre-release"
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Set version
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        shell: bash
+        run: echo '#define APP_VERSION "${{ inputs.release_tag }}"' > client/shared/version.h
+
+      - name: Build Release x64
+        run: msbuild client/bhoptools.sln /p:Configuration=Release /p:Platform=x64 /m /v:minimal
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bhoptools-x64
+          path: |
+            client/x64/Release/*.exe
+            client/x64/Release/*.pdb
+            client/windows/x64/Release/*.exe
+            client/windows/x64/Release/*.pdb
+          if-no-files-found: error
+
+  build-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        run: echo '#define APP_VERSION "${{ inputs.release_tag }}"' > client/shared/version.h
+
+      - name: Build
+        run: make -C client/linux
+
+      - name: Check glibc
+        run: make -C client/linux check-glibc
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bhoptools-linux-x64
+          path: |
+            client/linux/bhoptools.so
+            client/linux/bhoptools
+          if-no-files-found: error
+
+  # Run the workflow by hand with a release_tag to publish both builds as one release.
+  release:
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+    needs: [build, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bhoptools-x64
+          path: dist/windows
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: bhoptools-linux-x64
+          path: dist/linux
+
+      # Artifacts lose the executable bit; the tarball keeps it.
+      - name: Package
+        run: |
+          set -e
+          cp "$(find dist/windows -name bhoptools.exe | head -1)" bhoptools.exe
+          mkdir bhoptools-linux
+          cp dist/linux/bhoptools.so dist/linux/bhoptools bhoptools-linux/
+          chmod +x bhoptools-linux/bhoptools
+          tar czf bhoptools-linux.tar.gz bhoptools-linux
+          cp bhoptools-linux/* .
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ inputs.release_tag }}
+          prerelease: ${{ inputs.prerelease }}
+          files: |
+            bhoptools.exe
+            bhoptools-linux.tar.gz
+            bhoptools.so
+            bhoptools
+          body: |
+            ${{ inputs.notes }}
+
+            ---
+
+            Windows:
+            - Download `bhoptools.exe` and run it, it starts CS:S with `-insecure`.
+
+            Linux (64-bit CS:S):
+            - Download `bhoptools-linux.tar.gz` (or `bhoptools.so` and `bhoptools`) and extract it somewhere without spaces or `:` in the path.
+            - Run `./bhoptools` (`chmod +x` it first if you downloaded it on its own), and paste the launch options it prints into Steam.
+
+            Both:
+            - Everything is switched on and off in Options → `Fixes`.
+            - `F5` autohop prediction (Windows), `F7` viewpunch remover, `F8` pingfix (client-side prediction of triggers, rngfix and the HUD speed).
+            - On servers running the [bhoptools plugin](https://github.com/ddyfad/bhoptools): checkpoints, noclip, restarts, shavit runspeed, landfix, easybhop, style key blocking, shavit-syncstyle autosync and momsurffix2 predicted, mpbhops_but_working doors, and the map state synced from the server.

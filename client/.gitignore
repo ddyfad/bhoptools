@@ -1,0 +1,6 @@
+Debug
+Release
+.vs
+linux/bhoptools.so
+linux/bhoptools
+*.vcxproj.user
