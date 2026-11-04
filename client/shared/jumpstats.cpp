@@ -68,6 +68,7 @@ const int MIN_UPDATE_RATE = 50;
 const int TRAINER_FULLUPDATE_TICK_INTERVAL = 13;
 const int TRAINER_SIZE = 13;
 const float TRAINER_MIN_GAIN = 0.3f;
+const float PRETRAINER_STRETCH = 5.0f;
 const int IN_JUMP = 1 << 1, IN_DUCK = 1 << 2, IN_FORWARD = 1 << 3, IN_BACK = 1 << 4, IN_LEFT = 1 << 7, IN_RIGHT = 1 << 8,
 	IN_MOVELEFT = 1 << 9, IN_MOVERIGHT = 1 << 10;
 
@@ -120,8 +121,6 @@ int   g_lastOffset, g_repeatedOffsets;
 int   g_offsetHistory[OFFSETS_MAX_FRAME], g_currentFrame;
 float g_trainerNumber, g_lastAverage, g_trainerBar[3];
 int   g_trainerCmd;
-float g_preNumber, g_preLastAverage, g_preBar[3];
-int   g_preCmd;
 float g_currentSpeed;
 int   g_speedDirection, g_speedTick, g_yawTick;
 int   g_keysCmd, g_keysLastTurn, g_keysLastButtons;
@@ -482,71 +481,59 @@ void Trainer(bool inbhop, float jss)
 	ShowHud(HudTrainer, -1.0f, Color(idx), hold, 0, TrainerString(g_lastAverage, avg[which]));
 }
 
-// pretrainer.sp: the angle between velocity and wish direction each ground tick as a share of the angle that
-// gains the most speed, -1 with no move keys or while pushing straight ahead gains the most
-float PreShare(const float velocity[3], float forward, float side, float yaw, float maxspeed, float accelerate, float friction, float stopspeed, float frametime)
+// pretrainer.sp: this ground tick's speed gain over the most it could gain, as Friction then Accelerate give it.
+// 1 is the most, under is the wish direction too close to the velocity, over is the same loss with it too far
+// off; -1 without move keys.
+float PreValue(const float velocity[3], float forward, float side, float yaw, float maxspeed, float accelerate, float friction, float stopspeed, float frametime)
 {
 	float wishspeed = sqrtf(forward * forward + side * side);
 	if (maxspeed != 0.0f && wishspeed > maxspeed) wishspeed = maxspeed;
-	if (wishspeed < 0.01f) return -1.0f;
+	const float push = accelerate * frametime * wishspeed;
+	if (wishspeed < 0.01f || push <= 0.0f) return -1.0f;
 
-	float speed = sqrtf(velocity[0] * velocity[0] + velocity[1] * velocity[1]);
+	const float speed = sqrtf(velocity[0] * velocity[0] + velocity[1] * velocity[1]);
+	float after = speed;
 	if (speed >= 0.1f) {
 		const float control = speed < stopspeed ? stopspeed : speed;
-		speed -= control * friction * frametime;
+		after = speed - control * friction * frametime;
+		if (after < 0.0f) after = 0.0f;
 	}
-	float along = wishspeed - accelerate * frametime * wishspeed;
-	if (along < 0.0f) along = 0.0f;
-	if (speed <= along) return -1.0f;
 
 	const float rad = (yaw * 3.14159265358979323846f) / 180.0f;
 	const float wishx = cosf(rad) * forward + sinf(rad) * side;
 	const float wishy = sinf(rad) * forward - cosf(rad) * side;
-	float cosine = (velocity[0] * wishx + velocity[1] * wishy) / (sqrtf(velocity[0] * velocity[0] + velocity[1] * velocity[1]) * sqrtf(wishx * wishx + wishy * wishy));
-	if (cosine > 1.0f) cosine = 1.0f;
-	else if (cosine < -1.0f) cosine = -1.0f;
-	return acosf(cosine) / acosf(along / speed);
+	float along = 0.0f;
+	if (speed > 0.0f) along = (velocity[0] * wishx + velocity[1] * wishy) / sqrtf(wishx * wishx + wishy * wishy) * (after / speed);
+
+	float gained = after;
+	if (along < wishspeed) {
+		float add = wishspeed - along;
+		if (add > push) add = push;
+		gained = sqrtf(after * after + 2.0f * add * along + add * add);
+	}
+	float best = wishspeed - push;
+	if (best < 0.0f) best = 0.0f;
+	const float most = after <= best ? after + push : sqrtf(after * after + 2.0f * push * best + push * push);
+
+	const float share = (gained - after) / (most - after);
+	return along > best ? share : 2.0f - share;
 }
 
-void PreTrainer(bool inbhop, float surfaceFriction)
+// Every tick, the bar and colour PRETRAINER_STRETCH times as far from 100 as the number.
+void PreTrainer(bool inbhop)
 {
-	if (!Cvar(JSCV_PRETRAINER)) return;
-	++g_preCmd;
+	if (!Cvar(JSCV_PRETRAINER) || !(g_set[Bools2] & PRESTRAFETRAINER_ENABLED) || !g_haveMoveCvars) return;
 	const Move& m = g_move;
-	float share = -1.0f;
-	if (g_haveMoveCvars && !inbhop && !(m.buttons & (IN_JUMP | IN_DUCK)) && !m.noStats)
-		share = PreShare(m.velocity, m.forward, m.side, m.angles[1], m.maxSpeed, g_accelerate * surfaceFriction, g_friction * surfaceFriction, g_stopspeed, TickInterval() * m.lagged);
-	if (share < 0.0f) {
-		g_preNumber = 0.0f;
-		g_preBar[0] = g_preBar[1] = g_preBar[2] = 0.0f;
-		return;
-	}
-	g_preNumber += share;
-	for (float& b : g_preBar) b += share;
+	if (inbhop || (m.buttons & (IN_JUMP | IN_DUCK)) || m.noStats || m.stamina > 0.0f) return;
+	const float value = PreValue(m.velocity, m.forward, m.side, m.angles[1], m.maxSpeed, g_accelerate * m.surfaceFriction, g_friction * m.surfaceFriction, g_stopspeed, TickInterval() * m.lagged);
+	if (value < 0.0f) return;
 
-	const int cmd = g_preCmd;
-	if (cmd % TRAINER_FULLUPDATE_TICK_INTERVAL == 0) {
-		g_preLastAverage = g_preNumber / TRAINER_FULLUPDATE_TICK_INTERVAL;
-		g_preNumber = 0.0f;
-	}
-	const int rate = TickRate();
-	const int speeds[3] = { RoundToFloor(rate * (TRAINER_FULLUPDATE_TICK_INTERVAL / 100.0f)), RoundToFloor(rate * 0.09f), RoundToFloor(rate * 0.05f) };
-	const bool allowed[3] = { true, Cvar(JSCV_TRAINER_MEDIUM), Cvar(JSCV_TRAINER_FAST) };
-	float avg[3] = { -1.0f, -1.0f, -1.0f };
-	for (int i = 0; i < 3; ++i) {
-		if (allowed[i] && speeds[i] > 0 && cmd % speeds[i] == 0) {
-			avg[i] = g_preBar[i] / speeds[i];
-			g_preBar[i] = 0.0f;
-		}
-	}
-
-	const int which = g_set[TrainerSpeed] >= 0 && g_set[TrainerSpeed] < 3 ? g_set[TrainerSpeed] : Trainer_Slow;
-	if (!(g_set[Bools2] & PRESTRAFETRAINER_ENABLED) || avg[which] == -1.0f) return;
-	const int idx = PercentageColorIdx(avg[which] * 100, Has(TRAINER_STRICT));
-	const float hold = speeds[which] / (rate * 1.0f) + 0.05f;
+	const float stretched = 1.0f + (value - 1.0f) * PRETRAINER_STRETCH;
+	const int idx = PercentageColorIdx(stretched * 100, Has(TRAINER_STRICT));
+	const float hold = TRAINER_FULLUPDATE_TICK_INTERVAL / (TickRate() * 1.0f) + 0.05f;
 	// the first group whose own HUD is off, else 5
 	const int group = !Has(TRAINER_ENABLED) ? 0 : !Has(JHUD_ENABLED) ? 1 : !Has(OFFSETS_ENABLED) ? 2 : !Has(SHOWKEYS_ENABLED) ? 3 : !Has(SPEEDOMETER_ENABLED) ? 4 : 5;
-	ShowHud(HudPreStrafeTrainer, Color(idx), hold, group, TrainerString(g_preLastAverage, avg[which]));
+	ShowHud(HudPreStrafeTrainer, Color(idx), hold, group, TrainerString(value, stretched));
 }
 
 // speedometer.sp and yawdiff.sp, on every 5th and 10th command where the plugins count game frames
@@ -685,7 +672,7 @@ float Normalize(float v[3])
 	return len;
 }
 
-void ProcessPostRunCmd(const float origin[3], float surfaceFriction)
+void ProcessPostRunCmd(const float origin[3])
 {
 	Bgs& b = g_bgs;
 	const Move& m = g_move;
@@ -776,7 +763,7 @@ void ProcessPostRunCmd(const float origin[3], float surfaceFriction)
 	}
 
 	Trainer(b.ticksOnGround == 0, jssThisTick);
-	PreTrainer(b.ticksOnGround == 0, surfaceFriction);
+	PreTrainer(b.ticksOnGround == 0);
 	b.touchesWall = false;
 
 	if (b.jumpedThisTick) {
@@ -972,7 +959,7 @@ void OnJump()
 	b.jumpedThisTick = true;
 }
 
-void PostMove(const float origin[3], const float velocity[3], float surfaceFriction)
+void PostMove(const float origin[3], const float velocity[3])
 {
 	g_inMove = false;
 	if (!g_on) {
@@ -980,7 +967,7 @@ void PostMove(const float origin[3], const float velocity[3], float surfaceFrict
 		return;
 	}
 	if (g_touched) g_bgs.touchesWall = true;
-	ProcessPostRunCmd(origin, surfaceFriction);
+	ProcessPostRunCmd(origin);
 	Speedometer(velocity);
 	ShowYaws(velocity, g_move.angles[1]);
 }

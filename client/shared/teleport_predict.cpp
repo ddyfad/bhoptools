@@ -1694,6 +1694,11 @@ float TeleportPredict_SurfaceFriction(void* player)
     return tp::g_frictionOffset > 0 ? *reinterpret_cast<const float*>(static_cast<const char*>(player) + tp::g_frictionOffset) : 1.0f;
 }
 
+float TeleportPredict_Stamina(void* player)
+{
+    return tp::g_staminaOffset > 0 ? *reinterpret_cast<const float*>(static_cast<const char*>(player) + tp::g_staminaOffset) : 0.0f;
+}
+
 bool TeleportPredict_TraceDown(const float origin[3], float distance, bool ducked, bool onGround, bool firstRun, RngTraceResult& tr)
 {
     return tp::TraceDown(origin, distance, ducked, onGround, firstRun, tr);
