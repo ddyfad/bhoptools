@@ -35,28 +35,31 @@ static void Command(std::vector<std::string> args)
 	else if (args[0] == "bhoptools_jstime") js::Cmd_Time(c);
 }
 
-// jumpstats' defaults (PushDefault*), with `bools` in place of the default bools.
-static void Settings(uint32_t bools)
+// jumpstats' defaults (PushDefault*), with `bools` in place of the default bools. bools2 < 0 leaves
+// setting 15 out, as jumpstats before the prestrafe trainer does.
+static void Settings(uint32_t bools, int cvars = 511, int bools2 = -1)
 {
 	char hex[16];
-	std::vector<std::string> a = { "bhoptools_jsset", "7", "1", "511", "0", "1", "2", "3", "4", "5" };
+	std::vector<std::string> a = { "bhoptools_jsset", "7", "1", std::to_string(cvars), "0", "1", "2", "3", "4", "5" };
 	const int settings[15] = { 0, 1, 2, 3, 4, (int)bools, 1, 0, 0x02593300, 0, 0x66, 0, 0, 6, 0 };
 	for (int s : settings) {
 		snprintf(hex, sizeof(hex), "%x", (unsigned)s);
 		a.push_back(hex);
 	}
+	if (bools2 >= 0) a.push_back(std::to_string(bools2));
 	Command(a);
 }
 
 static int g_cmd;
 
-static void Step(bool onGround, int buttons, float side, float yaw, float vy)
+static void Step(bool onGround, int buttons, float side, float yaw, float vy, float vx = 0)
 {
 	js::Move m = {};
 	m.cmd = ++g_cmd;
 	m.buttons = buttons;
 	m.side = side;
 	m.angles[1] = yaw;
+	m.velocity[0] = vx;
 	m.velocity[1] = vy;
 	m.onGround = onGround;
 	m.maxSpeed = 250.0f;
@@ -152,6 +155,60 @@ int main()
 		CHECK((unsigned char)g_sent[0].data[9] == 255 && (unsigned char)g_sent[0].data[10] == 255 && (unsigned char)g_sent[0].data[11] == 255);
 		CHECK(FloatAt(g_sent[0].data, 5) == 89 / 255.0f);
 	}
+
+	// Real gain: at 40 u/s with 14 of it along wishdir, the engine takes the speed to
+	// sqrt(40² - 14² + 30²) = 48 of the best sqrt(40² + 30²) = 50, so 8 of 10. The old gain is (30 - 14) / 30.
+	const float vy = sqrtf(40 * 40 - 14 * 14);
+	Settings(defaults, 511 | JSCV_REALGAIN);
+	for (int i = 0; i < 12; ++i) Step(true, 0, 0, 90, 0);
+	Step(true, IN_JUMP, 400, 90, vy, 14);
+	for (int i = 0; i < 10; ++i) Step(false, 0, 400, 90, vy, 14);
+	g_sent.clear();
+	Step(true, IN_JUMP, 400, 90, vy, 14);
+	CHECK(g_sent.size() == 2);
+	if (g_sent.size() == 2) {
+		CHECK(HudText(g_sent[0]).find("\n80.00 100.00%") != std::string::npos);
+		CHECK(ChatText(g_sent[1]).find("| G: \x07" "ff000080%") != std::string::npos);
+	}
+	Settings(defaults);
+	for (int i = 0; i < 10; ++i) Step(false, 0, 400, 90, vy, 14);
+	g_sent.clear();
+	Step(true, IN_JUMP, 400, 90, vy, 14);
+	CHECK(g_sent.size() == 2);
+	if (g_sent.size() == 2) CHECK(HudText(g_sent[0]).find("\n53.33 100.00%") != std::string::npos);
+
+	// Prestrafe trainer: the ground speed every 5th command, kept through the air, on the first group
+	// whose own HUD is off.
+	Settings(defaults, 511 | JSCV_PRETRAINER, PRESTRAFETRAINER_ENABLED);
+	g_sent.clear();
+	for (int i = 0; i < 4; ++i) Step(true, 0, 0, 90, 265);
+	CHECK(g_sent.empty());
+	Step(true, 0, 0, 90, 265);
+	CHECK(g_sent.size() == 1);
+	if (g_sent.size() == 1) {
+		const Sent& hud = g_sent[0];
+		CHECK(hud.id == 21 && hud.data[0] == 0);
+		CHECK(FloatAt(hud.data, 1) == -1.0f && FloatAt(hud.data, 5) == -1.0f);
+		CHECK(hud.data[9] == 0 && (unsigned char)hud.data[10] == 255 && (unsigned char)hud.data[11] == 255);
+		CHECK(FloatAt(hud.data, 1 + 8 + 8 + 1 + 8) == 0.2f);
+		CHECK(HudText(hud) == " 265");
+	}
+	g_sent.clear();
+	for (int i = 0; i < 5; ++i) Step(false, 0, 0, 90, 300);
+	CHECK(g_sent.size() == 1 && HudText(g_sent[0]) == " 265");
+	Settings(defaults | TRAINER_ENABLED, 511 | JSCV_PRETRAINER, PRESTRAFETRAINER_ENABLED);
+	g_sent.clear();
+	for (int i = 0; i < 5; ++i) Step(true, 0, 0, 90, 271);
+	CHECK(g_sent.size() == 1);
+	if (g_sent.size() == 1) {
+		CHECK(g_sent[0].data[0] == 2 && HudText(g_sent[0]) == " 271");
+		CHECK((unsigned char)g_sent[0].data[9] == 255 && (unsigned char)g_sent[0].data[10] == 255 && (unsigned char)g_sent[0].data[11] == 255);
+	}
+	// Off in Bools2, or a plugin that doesn't send it, draws nothing.
+	Settings(defaults, 511 | JSCV_PRETRAINER);
+	g_sent.clear();
+	for (int i = 0; i < 5; ++i) Step(true, 0, 0, 90, 271);
+	CHECK(g_sent.empty());
 
 	// A new session draws nothing until settings come again.
 	js::Reset(8);

@@ -1,4 +1,4 @@
-// bgs-jumpstats' HUD for our own play (jhud, trainer, offsets, speedometer, showyaws, showkeys, ssj),
+// bgs-jumpstats' HUD for our own play (jhud, trainer, prestrafe trainer, offsets, speedometer, showyaws, showkeys, ssj),
 // drawn from our first-run commands with bhop-get-stats' numbers worked out here. The plugin sends
 // the player's settings and leaves those out for us while we draw them.
 #pragma once
