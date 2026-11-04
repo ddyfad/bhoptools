@@ -50,6 +50,9 @@ const int kServerAutosync = 1 << 13;
 const int kServerZones    = 1 << 16;
 const int kServerTeleportView = 1 << 17;
 const int kServerHold = 1 << 18;
+// The SourceJump plugin's landfix (bhoptools_move landfix 3) and momsurffix2 d0bb295 with bevel_fix and disp_fix.
+const int kServerSjLandfix = 1 << 24;
+const int kServerSjMsf     = 1 << 25;
 // bhoptools_hello flags
 const int kClientTriggers = 1 << 0;
 const int kClientMenus    = 1 << 1;
@@ -371,6 +374,7 @@ void ResetMove()
 	TeleportPredict_SetMoveSettings(0.0f, LANDFIX_OFF, false, INT_MIN);
 	g_hazeSkip.clear();
 	TeleportPredict_SetHazeSkip(g_hazeSkip);
+	TeleportPredict_SetSourceJumpLandfix(false);
 }
 
 void ResetZones()
@@ -517,6 +521,7 @@ void Cmd_Caps(const CCommandX& c)
 	if (!(g_serverFlags & kServerAutobhop)) rng.autobhop = false;
 	SetRngfix(rng);
 	if (!(g_serverFlags & kServerMove)) ResetMove();
+	else TeleportPredict_SetSourceJumpLandfix((g_serverFlags & kServerSjLandfix) != 0);
 	if (!(g_serverFlags & kServerMsf)) msf::SetSettings(MsfSettings(), false);
 	TeleportPredict_SetStateSync((g_serverFlags & kServerState) != 0);
 	// The server dumps its state after the hello; ask again if that doesn't arrive whole.
@@ -790,7 +795,8 @@ void Cmd_RestartState(const CCommandX& c)
 void Cmd_Move(const CCommandX& c)
 {
 	if (c.argc < 4 || !g_caps || !(g_serverFlags & kServerMove) || ArgInt(c, 1) != g_session) return;
-	const int landfix = ArgInt(c, 3) >= LANDFIX_OFF && ArgInt(c, 3) <= LANDFIX_OLIVIA ? ArgInt(c, 3) : LANDFIX_OFF;
+	int landfix = ArgInt(c, 3) >= LANDFIX_OFF && ArgInt(c, 3) <= LANDFIX_OLIVIA ? ArgInt(c, 3) : LANDFIX_OFF;
+	if (ArgInt(c, 3) == LANDFIX_SOURCEJUMP && (g_serverFlags & kServerSjLandfix)) landfix = LANDFIX_SOURCEJUMP;
 	const float runspeed = ArgHexFloat(c, 2);
 	const bool easybhop = c.argc > 4 && ArgInt(c, 4) != 0;
 	const int fromCmd = c.argc > 5 ? ArgInt(c, 5) : INT_MIN;
@@ -830,6 +836,7 @@ void Cmd_Msf(const CCommandX& c)
 	s.retrace          = retrace < 0.2f ? 0.2f : (retrace > 5.0f ? 5.0f : retrace);
 	s.noclipWorkaround = ArgInt(c, 5) != 0;
 	s.windowsServer    = ArgInt(c, 6) == 1;
+	s.sourceJump       = (g_serverFlags & kServerSjMsf) != 0;
 	msf::SetSettings(s, true);
 }
 
@@ -2114,7 +2121,7 @@ void PrintState()
 	if (!g_slot || g_disabled) { CoreLog("checkpoints: off (unavailable)"); return; }
 	if (!g_caps) { CoreLog("checkpoints: off (server has no bhoptools plugin)"); return; }
 	if (!tp::Enabled()) { CoreLog("checkpoints: off (impulse binds still predicted)"); return; }
-	static const char* const kLandfix[] = { "off", "haze", "olivia" };
+	static const char* const kLandfix[] = { "off", "haze", "olivia", "sourcejump" };
 	const MoveSettings& m = TeleportPredict_MoveSettings();
 	char runspeed[16] = "stock";
 	if (m.runspeed > 0.0f) snprintf(runspeed, sizeof(runspeed), "%.2f", m.runspeed);

@@ -290,6 +290,20 @@ struct OliviaRun {
 };
 OliviaRun g_olivia = {};
 
+// The SourceJump plugin's landfix, from a server whose caps say so: a post hook on CheckJumpButton.
+bool g_sjLandfix = false;
+struct SjJump {
+    char* pl;            // null outside a command it applies to
+    char* md;
+    bool  ducked;
+    bool  onGround;
+    bool  firstRun;
+    bool  lifts;         // the style gets the lift and the jump would be a bhop or jumpbug
+    int   startGround;
+    bool  triggers;      // the sim's world is this command's, so the lift is kept for its booster touches
+};
+SjJump g_sjJump = {};
+
 // While bhoptools_log is on: each jump's ground offset and how far the server's result was from ours.
 bool g_jumpLog = false;
 char* g_jumpPl = nullptr;
@@ -877,6 +891,50 @@ void JumpLogJump(float preZ)
         g_lastJump.replayOff = off;
 }
 
+// The player's hull as landfix.sp traces it; false when nothing can trace.
+bool SjHull(const float start[3], const float end[3], bool ducked, bool onGround, bool firstRun, RngTraceResult& tr)
+{
+    RngTracer* t = g_rngp ? RngPredictTracer(*g_rngp, start, onGround, firstRun) : nullptr;
+    if (!t) return false;
+    const float mins[3] = { -16.0f, -16.0f, 0.0f };
+    const float maxs[3] = { 16.0f, 16.0f, ducked ? 45.0f : 62.0f };
+    return t->TraceHull(start, end, mins, maxs, tr);
+}
+
+// landfix.sp's Landfix_OnJump: every jump ends the last lift, and a bhop or jumpbug may start a new one.
+void SjLandfixJump()
+{
+    const SjJump& j = g_sjJump;
+    float* origin = reinterpret_cast<float*>(j.md + MV_AbsOrigin);
+    float z = origin[2];
+    if (j.lifts) {
+        auto hull = [&](const float* a, const float* b, bool* hit, bool* startSolid, float* endZ) {
+            RngTraceResult tr;
+            if (!SjHull(a, b, j.ducked, j.onGround, j.firstRun, tr)) return false;
+            *hit = tr.fraction < 1.0f || tr.allSolid || tr.startSolid;
+            *startSolid = tr.startSolid;
+            *endZ = tr.endpos[2];
+            return true;
+        };
+        LandfixSjZ(origin, hull, &z);
+    }
+    const float lift = z - origin[2];
+    origin[2] = z;
+    if (j.triggers) g_rt.world.landfixLift = lift;
+}
+
+// Boosters are touched from where the player would be without the lift, traced so it stays out of the floor.
+bool SjUnlift(const float origin[3], float lift, const float mins[3], const float maxs[3], float out[3])
+{
+    RngTracer* t = g_rngp ? RngPredictTracer(*g_rngp, origin, false, false) : nullptr;
+    if (!t) return false;
+    const float end[3] = { origin[0], origin[1], origin[2] - lift };
+    RngTraceResult tr;
+    if (!t->TraceHull(origin, end, mins, maxs, tr)) return false;
+    memcpy(out, tr.endpos, sizeof(tr.endpos));
+    return true;
+}
+
 bool Hooked_CheckJumpButton(void* self)
 {
     const OliviaRun& o = g_olivia;
@@ -909,6 +967,7 @@ bool Hooked_CheckJumpButton(void* self)
     if (jumped) js::OnJump();
     if (jumped && boostDoor >= 0)
         PredMpbhopsJump(g_rt, boostDoor, reinterpret_cast<float*>(g_mpbhopsJump.pl + g_baseVelOffset));
+    if (jumped && g_sjJump.pl) SjLandfixJump();
     return jumped;
 }
 
@@ -980,6 +1039,7 @@ ZoneNow ZonesNow(const char* pl)
 void LandfixPreMove(char* pl, char* md, bool firstRun, bool active)
 {
     g_olivia.pl = nullptr;
+    g_sjJump.pl = nullptr;
     int key = g_runningKey;
     if (key == INT_MIN) key = *reinterpret_cast<const int*>(pl + g_tickBaseOffset);
     const int ground = GroundIndex(pl);
@@ -989,6 +1049,14 @@ void LandfixPreMove(char* pl, char* md, bool firstRun, bool active)
     if (!active) return;
 
     const int flags = *reinterpret_cast<const int*>(pl + g_flagsOffset);
+    // Armed for every style: a jump in one without the lift still ends the last one.
+    if (g_sjLandfix) {
+        if (!oCheckJumpButton) return;
+        g_sjJump = { pl, md, (flags & FL_DUCKING) != 0, (flags & FL_ONGROUND) != 0, firstRun,
+            g_moveNow.landfix == LANDFIX_SOURCEJUMP && LandfixSjJumpLifts(havePrev, prev, ground), ground, false };
+        return;
+    }
+
     const int moveType = g_moveTypeOffset > 0 ? *reinterpret_cast<const uint8_t*>(pl + g_moveTypeOffset) : PRED_MOVETYPE_WALK;
     const bool alive = LifeAlive(pl);
     float* origin = reinterpret_cast<float*>(md + MV_AbsOrigin);
@@ -1131,7 +1199,7 @@ void Hooked_ProcessMovement(void* thisptr, void* pPlayer, void* pMove)
     g_maxSpeedPlayer = serverMove && g_moveNow.runspeed > 0.0f && g_maxSpeedIndex > 0 && LifeAlive(pl)
         && HookMaxSpeed(pPlayer) ? pPlayer : nullptr;
     if (netvars && g_groundOffset > 0)
-        LandfixPreMove(pl, md, firstRun, serverMove && g_moveNow.landfix != LANDFIX_OFF);
+        LandfixPreMove(pl, md, firstRun, serverMove && (g_moveNow.landfix != LANDFIX_OFF || g_sjLandfix));
     // Zeroed before and after the move, as the server does and networks. Otherwise the stamina jump
     // penalty predicts every hop within a round trip of the last ~21% low.
     float* const stamina = serverMove && netvars && g_moveNow.easybhop && g_staminaOffset > 0
@@ -1146,6 +1214,8 @@ void Hooked_ProcessMovement(void* thisptr, void* pPlayer, void* pMove)
     const bool triggers = g_enabled && netvars && !g_levelFailed && g_rt.map && g_offsetsGood;
     g_rt.mpbhops = triggers && g_mpbhopsLoaded;
     g_rt.useTrace = UseTrace;
+    g_rt.landfixUnlift = SjUnlift;
+    g_sjJump.triggers = triggers;
     if (!rngWanted) RngPredictStop(*g_rngp, g_rt);
     if (!triggers) {
         g_rt.cpTeleportPending = false;
@@ -1160,6 +1230,7 @@ void Hooked_ProcessMovement(void* thisptr, void* pPlayer, void* pMove)
         g_maxSpeedPlayer = nullptr;
         msf::Arm(nullptr);
         g_olivia.pl = nullptr;
+        g_sjJump.pl = nullptr;
         if (netvars) speedo::OnMove(Alive(pl), &velocity->x, firstRun);
         if (predLog) PredLogEnd(pl, predKey, false);
         return;
@@ -1217,6 +1288,9 @@ void Hooked_ProcessMovement(void* thisptr, void* pPlayer, void* pMove)
     g_maxSpeedPlayer = nullptr;
     msf::Arm(nullptr);
     g_olivia.pl = nullptr;
+    // landfix.sp ends the lift after a command that ends a second tick on the ground, after its touches.
+    g_rt.landfixEndsLift = g_sjJump.pl && g_sjJump.startGround != -1 && GroundIndex(pl) != -1;
+    g_sjJump.pl = nullptr;
     if (rng) RngPredictPostMove(*g_rngp, io, g_waterLevelOffset > 0 ? WaterLevel(pl) : -1,
         g_moveTypeOffset > 0 ? *reinterpret_cast<const uint8_t*>(pl + g_moveTypeOffset) : -1);
     if (triggers) PredPostMove(g_rt, io);
@@ -1716,6 +1790,12 @@ bool TeleportPredict_ZonesPreCmd(void* player, int cmdNumber, ZsCmd& c, int* inS
 	tp::g_rt.zonePreGroundKey = key;
 	tp::g_rt.zonePreGround = c.onGround;
 	return true;
+}
+
+void TeleportPredict_SetSourceJumpLandfix(bool on)
+{
+	tp::g_sjLandfix = on;
+	if (!on) tp::g_rt.world.landfixLift = 0.0f;
 }
 
 void TeleportPredict_SetHazeSkip(const std::vector<int>& entities)

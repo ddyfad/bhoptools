@@ -8,8 +8,9 @@
 #include <cstring>
 #include <vector>
 
-// bhoptools_move's landfix field: SuperLandfix_GetMethod's numbers.
-enum LandfixMethod { LANDFIX_OFF = 0, LANDFIX_HAZE = 1, LANDFIX_OLIVIA = 2 };
+// bhoptools_move's landfix field: SuperLandfix_GetMethod's numbers, and 3 for the SourceJump plugin's
+// landfix, only taken from a server whose caps say it follows SourceJump's rules.
+enum LandfixMethod { LANDFIX_OFF = 0, LANDFIX_HAZE = 1, LANDFIX_OLIVIA = 2, LANDFIX_SOURCEJUMP = 3 };
 
 struct MoveSettings {
 	float runspeed = 0.0f;       // 0: GetPlayerMaxSpeed isn't overridden
@@ -95,6 +96,32 @@ static inline bool LandfixOliviaZ(float z, float endZ, float* out)
 	if (diff < 0.49f) { *out = endZ + 0.49f; return true; }
 	if (diff > 1.5f && diff < 2.0f) { *out = endZ + 1.5f; return true; }
 	return false;
+}
+
+// SourceJump's landfix.sp counts the commands that ended on the ground in OnPlayerRunCmdPost and lifts only
+// a jump with at most one before it: a bhop on the first ground tick, or a jumpbug. The ground at a
+// command's start is the last one's end; without that history the jump is taken as a bhop.
+static inline bool LandfixSjJumpLifts(bool havePrev, int prevGround, int ground)
+{
+	return ground == -1 || !havePrev || prevGround == -1;
+}
+
+// Its lift after CheckJumpButton decides a jump. `hull(start, end, &hit, &startSolid, &endZ)` is the
+// player's hull traced with MASK_PLAYERSOLID past other players, false when it can't trace. From 2 above
+// the origin to 2.1 below it must hit ground, and 1.5 above that must be clear.
+template <typename Hull>
+static inline bool LandfixSjZ(const float origin[3], Hull hull, float* out)
+{
+	float above[3] = { origin[0], origin[1], origin[2] + 2.0f };
+	float below[3] = { origin[0], origin[1], origin[2] - 2.1f };
+	bool hit, startSolid;
+	float endZ;
+	if (!hull(above, below, &hit, &startSolid, &endZ) || !hit || startSolid) return false;
+	below[2] = endZ;
+	above[2] = endZ + 1.5f;
+	if (!hull(below, above, &hit, &startSolid, &endZ) || hit || startSolid) return false;
+	*out = above[2];
+	return true;
 }
 
 // Each command's ground entity at its start, by command number, so a replay from a server

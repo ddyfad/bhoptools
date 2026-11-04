@@ -1030,8 +1030,59 @@ static void TestDoorSync()
 	CHECK(w.rt.world.ents[d].disabled && w.rt.world.ents[d].doorDoneTick == INT_MAX);
 }
 
+// The SourceJump landfix's boosters, touched from the unlifted position while a lift lasts.
+static void TestSjBoosters()
+{
+	const char* boost = "!activator,AddOutput,basevelocity 0 0 500,0,-1";
+	BspModel thin = {}, thick = {};
+	thin.maxs[2] = 2.0f;
+	thick.maxs[2] = 4.0f;  // 6 between m_vecMins and m_vecMaxs
+	const PredMapEntity multi = Ent({ { "classname", "trigger_multiple" }, { "OnStartTouch", boost } });
+	CHECK(PredSjBooster(multi, PC_MULTIPLE, thin));
+	CHECK(!PredSjBooster(multi, PC_MULTIPLE, thick));
+	CHECK(!PredSjBooster(Ent({ { "OnStartTouch", boost }, { "parentname", "train" } }), PC_MULTIPLE, thin));
+	CHECK(PredSjBooster(Ent({ { "OnEndTouch", "!activator\x1b" "AddOutput\x1b" " basevelocity 0 400 0 \x1b" "0\x1b" "-1" } }), PC_MULTIPLE, thin));
+	CHECK(!PredSjBooster(Ent({ { "OnStartTouch", "!activator,AddOutput,basevelocity 0 0 500,0,1" } }), PC_MULTIPLE, thin));
+	CHECK(!PredSjBooster(Ent({ { "OnStartTouch", "!activator,AddOutput,BASEVELOCITY 0 0 0,0,-1" } }), PC_MULTIPLE, thin));
+	CHECK(!PredSjBooster(Ent({ { "OnTrigger", boost } }), PC_MULTIPLE, thin));
+	CHECK(PredSjBooster(Ent({ { "pushdir", "0 90 0" } }), PC_PUSH, thin));
+	CHECK(PredSjBooster(Ent({ { "pushdir", "90 0 0" } }), PC_PUSH, thin));     // down
+	CHECK(!PredSjBooster(Ent({ { "pushdir", "-90 0 0" } }), PC_PUSH, thin));   // up keeps the lifted touches
+	CHECK(!PredSjBooster(Ent({ { "pushdir", "-30 0 0" } }), PC_PUSH, thin));
+	CHECK(!PredSjBooster(Ent({ { "pushdir", "0 0 0" }, { "spawnflags", "129" } }), PC_PUSH, thin));  // once
+
+	// Feet at 2.5 lifted 1.5: a floor booster under them is touched, one at head height isn't; a thick
+	// trigger is touched where the player is.
+	const std::vector<Box> boxes = {
+		{ { -64, -64, 0 }, { 64, 64, 2 } },
+		{ { -64, -64, 63.5f }, { 64, 64, 65.5f } },
+		{ { -64, -64, 0 }, { 64, 64, 4 } },
+	};
+	const std::vector<PredMapEntity> ents = {
+		WorldEnt(),
+		Ent({ { "classname", "trigger_multiple" }, { "model", "*1" }, { "targetname", "floor" }, { "spawnflags", "1" }, { "OnStartTouch", boost } }),
+		Ent({ { "classname", "trigger_push" }, { "model", "*2" }, { "targetname", "head" }, { "spawnflags", "1" }, { "pushdir", "0 0 0" } }),
+		Ent({ { "classname", "trigger_multiple" }, { "model", "*3" }, { "targetname", "thick" }, { "spawnflags", "1" }, { "OnStartTouch", boost } }),
+	};
+	const float feet[3] = { 0, 0, 2.5f };
+	World w(BoxMap(boxes, ents));
+	const int fl = w.Sim("floor"), hd = w.Sim("head"), th = w.Sim("thick");
+	CHECK(w.rt.map->sim[fl].sjBooster && w.rt.map->sim[hd].sjBooster && !w.rt.map->sim[th].sjBooster);
+	w.rt.world.landfixLift = 1.5f;
+	w.Cmd(feet);
+	CHECK(w.rt.world.ents[fl].linked && !w.rt.world.ents[hd].linked && w.rt.world.ents[th].linked);
+	// The lift ends after the command's touches.
+	w.rt.landfixEndsLift = true;
+	w.Cmd(feet);
+	CHECK(w.rt.world.landfixLift == 0.0f && w.rt.world.ents[fl].linked);
+	w.rt.landfixEndsLift = false;
+	w.Cmd(feet);
+	CHECK(!w.rt.world.ents[fl].linked && w.rt.world.ents[hd].linked);
+}
+
 int main()
 {
+	TestSjBoosters();
 	TestEveryCommandAFrame();
 	TestBatchedFrame();
 	TestInOutOneFrame();

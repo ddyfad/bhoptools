@@ -110,11 +110,56 @@ static void TestGroundLog()
 	CHECK(!log.Get(101, &g));
 }
 
+// A flat floor, and a ceiling the hull's bottom can't rise past; the hull traced straight up or down.
+struct FlatHull {
+	float floor;
+	float ceiling;
+	int traces;
+	bool operator()(const float* a, const float* b, bool* hit, bool* startSolid, float* endZ)
+	{
+		++traces;
+		*startSolid = a[2] < floor || a[2] > ceiling;
+		*hit = *startSolid || b[2] < floor || b[2] > ceiling;
+		*endZ = *startSolid ? a[2] : b[2] < floor ? floor : b[2] > ceiling ? ceiling : b[2];
+		return true;
+	}
+};
+
+static void TestSourceJump()
+{
+	CHECK(!LandfixSjJumpLifts(true, 0, 0));   // a second tick on the ground
+	CHECK(LandfixSjJumpLifts(true, -1, 0));   // the first ground tick: a bhop
+	CHECK(LandfixSjJumpLifts(true, 0, -1));   // in the air at the start: a jumpbug
+	CHECK(LandfixSjJumpLifts(false, 0, 0));   // no history
+	CHECK(LandfixSjJumpLifts(true, -1, 57));
+
+	float z = 0.0f;
+	FlatHull flat = { 100.0f, 1e9f, 0 };
+	// Landed 0.02 above the floor: 1.5 over the floor the trace from 2 above finds.
+	const float landed[3] = { 0, 0, 100.02f };
+	CHECK(LandfixSjZ(landed, flat, &z) && z == 101.5f);
+	// Stopped below standing height, as landings can: still from the floor.
+	const float sunk[3] = { 0, 0, 99.994f };
+	CHECK(LandfixSjZ(sunk, flat, &z) && z == 101.5f);
+	// Nothing within 2.1 below: no lift.
+	const float high[3] = { 0, 0, 102.2f };
+	CHECK(!LandfixSjZ(high, flat, &z));
+	// A low ceiling: the trace from 2 above starts inside it.
+	FlatHull low = { 100.0f, 101.0f, 0 };
+	const float floorLevel[3] = { 0, 0, 100.0f };
+	CHECK(!LandfixSjZ(floorLevel, low, &z) && low.traces == 1);
+	// Room for the trace from above, not for the 1.5 up from the floor.
+	FlatHull lowFloor = { 100.0f, 101.2f, 0 };
+	const float low2[3] = { 0, 0, 99.0f };
+	CHECK(!LandfixSjZ(low2, lowFloor, &z) && lowFloor.traces == 2);
+}
+
 int main()
 {
 	TestMaxSpeedScan();
 	TestHaze();
 	TestOlivia();
+	TestSourceJump();
 	TestGroundLog();
 	printf("movement: %d passed, %d failed\n", g_pass, g_fail);
 	return g_fail ? 1 : 0;

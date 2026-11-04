@@ -117,6 +117,8 @@ struct PredSimEnt {
 	float doorTravel = 0.0f; // seconds from one end to the other
 	bool  doorStartOpen = false;
 	bool  doorUse = false;   // "use opens", and the sim can place it for FindUseEntity
+
+	bool  sjBooster = false; // the SourceJump landfix touches it from the unlifted position
 };
 
 struct PredEntState {
@@ -165,6 +167,8 @@ struct PredWorld {
 	bool                      rngTeleportSeq = false;
 	int                       mpbhopsBlock = -1;
 	float                     mpbhopsPunish = 0.0f;
+	// The SourceJump landfix's lift of the last jump, until it ends; 0 for none.
+	float                     landfixLift = 0.0f;
 	std::vector<int>          linkedList;
 	ZsState                   zones;
 };
@@ -657,6 +661,38 @@ static int PredScriptLookup(const PredMap& map, const PredScriptIndex& idx, int 
 
 static void PredBuildMpbhops(PredMap& map);
 
+// SourceJump's landfix.sp: a trigger_multiple output that keeps setting the activator's basevelocity.
+static bool PredSjBoostOutput(const char* value)
+{
+	std::vector<std::string> fields;
+	PredSplitOutput(value, fields);
+	if (fields.size() < 3) return false;
+	std::string param = fields[2];
+	const char* ws = " \t\r\n";
+	param.erase(0, param.find_first_not_of(ws));
+	param.erase(param.find_last_not_of(ws) + 1);
+	const int times = fields.size() > 4 ? atoi(fields[4].c_str()) : 0;
+	return strncasecmp(param.c_str(), "basevelocity", 12) == 0 && strcasecmp(param.c_str(), "basevelocity 0 0 0") != 0 && times != 1;
+}
+
+// Its boosters: trigger_push without the once flag pushing level or down, and trigger_multiple with a
+// repeatable basevelocity output, unparented and at most 4u thick. Thickness is m_vecMaxs - m_vecMins,
+// and the engine spreads a brush model's bounds by a unit each side.
+static bool PredSjBooster(const PredMapEntity& ent, PredClass cls, const BspModel& m)
+{
+	if (ent.Get("parentname")[0]) return false;
+	if ((m.maxs[2] + 1.0f) - (m.mins[2] - 1.0f) > 4.0f + 0.01f) return false;
+	if (cls == PC_PUSH) {
+		if (atoi(ent.Get("spawnflags", "0")) & 0x80) return false;
+		const float pitch = (float)atof(ent.Get("pushdir", "0 0 0"));
+		return sinf(pitch * 3.14159265f / 180.0f) >= -0.01f;
+	}
+	for (const auto& kv : ent.kv)
+		if ((!strcasecmp(kv.key.c_str(), "OnStartTouch") || !strcasecmp(kv.key.c_str(), "OnEndTouch")) && PredSjBoostOutput(kv.value.c_str()))
+			return true;
+	return false;
+}
+
 static void PredBuildTriggers(PredMap& map)
 {
 	std::vector<int> simEntity, entSim;
@@ -825,6 +861,8 @@ static void PredBuildTriggers(PredMap& map)
 		}
 		if (PredIsTriggerClass(e.cls) && (e.modelIndex < 0 || movesWithParent(ent))) skip = true;
 		if (skip) { e.cls = PC_NONE; continue; }
+		if (e.cls == PC_PUSH || e.cls == PC_MULTIPLE)
+			e.sjBooster = e.modelIndex < (int)map.models.size() && PredSjBooster(ent, e.cls, map.models[e.modelIndex]);
 
 		e.actionStart = (int)map.actions.size();
 		for (const auto& kv : ent.kv) {
@@ -956,6 +994,11 @@ struct PredRuntime {
 	// FindUseEntity's trace (MASK_NPCSOLID_BRUSHONLY | MASK_OPAQUE_AND_NPCS), a box of half size
 	// `half`. False when it can't trace; the use is then predicted as if nothing were in the way.
 	bool (*useTrace)(const float start[3], const float end[3], float half, float* fraction) = nullptr;
+	// The player's hull traced down by `lift` (MASK_PLAYERSOLID), where the SourceJump landfix touches
+	// boosters from. False when it can't trace; the origin is then taken straight down.
+	bool (*landfixUnlift)(const float origin[3], float lift, const float mins[3], const float maxs[3], float out[3]) = nullptr;
+	// This command ends the lift once its touches are done.
+	bool landfixEndsLift = false;
 
 	// serviceBase: the command whose start services a zero-tick player event added now.
 	PredPlayerIO* io = nullptr;
@@ -1752,6 +1795,8 @@ static void PredRunTouch(PredRuntime& rt, PredPlayerIO& io)
 
 	float queryOrigin[3] = { io.origin[0], io.origin[1], io.origin[2] };
 	PredGatherCandidates(rt, queryOrigin, io.mins, io.maxs);
+	float unlifted[3];
+	bool haveUnlifted = false;
 	// Teleports last: the server's order is its partition's, where the triggers sharing a pass with
 	// a teleport were mostly touched before it.
 	for (int pass = 0; pass < 2; ++pass)
@@ -1761,8 +1806,19 @@ static void PredRunTouch(PredRuntime& rt, PredPlayerIO& io)
 			if ((e.cls == PC_TELEPORT) != (pass == 1)) continue;
 			if (st.removed) { st.stale = st.linked; continue; }
 
-			const bool overlap = !st.disabled
-				&& PredBoxInModel(map, e.modelIndex, e.xf, queryOrigin, io.mins, io.maxs);
+			// The SourceJump landfix drops the lifted touch of a booster and adds the unlifted one, with
+			// TR_ClipRayHullToEntity's MASK_ALL.
+			const bool sj = e.sjBooster && w.landfixLift != 0.0f;
+			if (sj && !haveUnlifted) {
+				haveUnlifted = true;
+				if (!rt.landfixUnlift || !rt.landfixUnlift(queryOrigin, w.landfixLift, io.mins, io.maxs, unlifted)) {
+					memcpy(unlifted, queryOrigin, sizeof(unlifted));
+					unlifted[2] -= w.landfixLift;
+				}
+			}
+			const bool overlap = !st.disabled && (sj
+				? PredBoxInModel(map, e.modelIndex, e.xf, unlifted, io.mins, io.maxs, -1)
+				: PredBoxInModel(map, e.modelIndex, e.xf, queryOrigin, io.mins, io.maxs));
 			if (overlap) PredLinkAndTouch(rt, i);
 			else if (st.linked) st.stale = 1;
 		}
@@ -2086,6 +2142,7 @@ static void PredPostMove(PredRuntime& rt, PredPlayerIO& io)
 	rt.world.movedLast = before[0] != io.origin[0] || before[1] != io.origin[1] || before[2] != io.origin[2];
 	rt.world.duckedAtEnd = (*io.flags & FL_DUCKING) != 0;
 	rt.world.gravity = *io.gravity;
+	if (rt.landfixEndsLift) rt.world.landfixLift = 0.0f;
 	PredCommandEnd(rt, PredEventClock(io), PredSnapshotKey(io));
 }
 

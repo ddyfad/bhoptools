@@ -85,6 +85,30 @@ struct BoxWorld : MsfWorld {
 	}
 
 	void AddToTouched(const etrace::GameTraceX&, float*) override { ++touches; }
+
+	void Hull(float mins[3], float maxs[3]) override
+	{
+		MsfCopy(hullMins, mins);
+		MsfCopy(hullMaxs, maxs);
+	}
+};
+
+// A box world whose traces with a shrunk hull (the bevel and disp probes) report `probe` instead.
+struct ProbeWorld : BoxWorld {
+	bool probeSet = false;
+	etrace::GameTraceX probe;
+	int probes = 0;
+	float probeShrink = 0.0f;
+
+	void Trace(const float start[3], const float end[3], const float* subMins, const float* addMaxs,
+	           etrace::GameTraceX& tr) override
+	{
+		BoxWorld::Trace(start, end, subMins, addMaxs, tr);
+		if (!subMins || subMins[0] >= 0.0f) return;
+		++probes;
+		probeShrink = -subMins[0];
+		if (probeSet) tr = probe;
+	}
 };
 
 static MsfMove Move(float* origin, float* vel, bool onGround)
@@ -390,8 +414,99 @@ static void TestCheckStuck()
 	CHECK(MsfCheckStuck(sw, s, origin, vel, 2.0f) == 0 && s.last == 0 && VecIs(origin, 0, 0, 0.125f, 0));
 }
 
+static etrace::GameTraceX Hit(float fraction, float nx, float ny, float nz)
+{
+	etrace::GameTraceX tr;
+	memset(&tr, 0, sizeof(tr));
+	tr.fraction = fraction;
+	tr.plane.normal[0] = nx;
+	tr.plane.normal[1] = ny;
+	tr.plane.normal[2] = nz;
+	return tr;
+}
+
+// The SourceJump plugin's momsurffix2 d0bb295: bevel_fix, disp_fix and the one-plane clip in the air.
+static void TestSourceJump()
+{
+	const float start[3] = { 0, 0, 0 }, end[3] = { 10, 0, 0 };
+	// Bevel: an axis-aligned hit at 5 is replaced by the face a 0.1 smaller hull meets within 4 further.
+	{
+		ProbeWorld w;
+		w.probeSet = true;
+		w.probe = Hit(0.5f, -0.6f, 0.0f, 0.8f);  // 7 of 14
+		etrace::GameTraceX pm = Hit(0.5f, -1.0f, 0.0f, 0.0f);
+		MsfFixBevelPlane(w, start, end, pm);
+		CHECK(w.probes == 1 && Near(w.probeShrink, 0.1f) && VecIs(pm.plane.normal, -0.6f, 0.0f, 0.8f, 0));
+	}
+	{
+		ProbeWorld w;
+		w.probeSet = true;
+		w.probe = Hit(0.3f, -0.6f, 0.0f, 0.8f);  // 4.2, before the hit
+		etrace::GameTraceX pm = Hit(0.5f, -1.0f, 0.0f, 0.0f);
+		MsfFixBevelPlane(w, start, end, pm);
+		CHECK(VecIs(pm.plane.normal, -1.0f, 0.0f, 0.0f, 0));
+		w.probe = Hit(0.5f, 0.0f, 0.0f, 1.0f);  // axial again
+		MsfFixBevelPlane(w, start, end, pm);
+		CHECK(VecIs(pm.plane.normal, -1.0f, 0.0f, 0.0f, 0));
+	}
+	{
+		ProbeWorld w;
+		etrace::GameTraceX pm = Hit(0.5f, -0.6f, 0.0f, 0.8f);
+		MsfFixBevelPlane(w, start, end, pm);
+		CHECK(w.probes == 0);
+	}
+	// Disp: a seam normal (a zero component) is replaced by a displacement face that touches the full hull at
+	// the stop. Hull centre z 31, half sizes 16 16 31: the face below has dist -13.44 to touch it.
+	{
+		ProbeWorld w;
+		w.probeSet = true;
+		w.probe = Hit(0.5f, 0.36f, 0.48f, 0.8f);
+		w.probe.dispFlags = 1;
+		w.probe.plane.dist = -13.44f;
+		etrace::GameTraceX pm = Hit(0.5f, 0.0f, 0.6f, 0.8f);
+		MsfFixDispSeamPlane(w, start, end, pm);
+		CHECK(w.probes == 1 && Near(w.probeShrink, 0.05f) && VecIs(pm.plane.normal, 0.36f, 0.48f, 0.8f, 0));
+		pm = Hit(0.5f, 0.0f, 0.6f, 0.8f);
+		w.probe.plane.dist = -13.0f;  // 0.44 off
+		MsfFixDispSeamPlane(w, start, end, pm);
+		CHECK(VecIs(pm.plane.normal, 0.0f, 0.6f, 0.8f, 0));
+		w.probe.plane.dist = -13.44f;
+		w.probe.dispFlags = 0;  // not a displacement
+		MsfFixDispSeamPlane(w, start, end, pm);
+		CHECK(VecIs(pm.plane.normal, 0.0f, 0.6f, 0.8f, 0));
+	}
+	// One plane in the air takes sv_bounce's overbounce, as momsurffix2 has it; on the ground it doesn't.
+	{
+		BoxWorld w;
+		w.boxes.push_back({ { 20, -1000, -1000 }, { 100, 1000, 1000 } });
+		float origin[3] = { 0, 0, 0 }, vel[3] = { 100, 100, 0 };
+		MsfMove m = Move(origin, vel, false);
+		m.frametime = 0.1f;
+		m.bounce = 1.0f;
+		m.surfaceFriction = 0.5f;
+		MsfSettings s = Known();
+		s.sourceJump = true;
+		MsfTryPlayerMove(w, s, m, nullptr, nullptr);
+		CHECK(Near(vel[0], -50.03125f, 1e-4f) && Near(vel[1], 100.0f, 1e-4f));
+	}
+	{
+		BoxWorld w;
+		w.boxes.push_back({ { 20, -1000, -1000 }, { 100, 1000, 1000 } });
+		float origin[3] = { 0, 0, 0 }, vel[3] = { 100, 100, 0 };
+		MsfMove m = Move(origin, vel, true);
+		m.frametime = 0.1f;
+		m.bounce = 1.0f;
+		m.surfaceFriction = 0.5f;
+		MsfSettings s = Known();
+		s.sourceJump = true;
+		MsfTryPlayerMove(w, s, m, nullptr, nullptr);
+		CHECK(Near(vel[0], -0.03125f, 1e-4f) && Near(vel[1], 100.0f, 1e-4f));
+	}
+}
+
 int main()
 {
+	TestSourceJump();
 	TestCheckStuck();
 	TestClipVelocity();
 	TestVectorNatives();

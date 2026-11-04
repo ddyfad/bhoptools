@@ -155,7 +155,7 @@ public:
 	           etrace::GameTraceX& tr) override
 	{
 		if (subMins) {
-			const Vec3 mins = Hull(oGetPlayerMins, gm_), maxs = Hull(oGetPlayerMaxs, gm_);
+			const Vec3 mins = ::msf::Hull(oGetPlayerMins, gm_), maxs = ::msf::Hull(oGetPlayerMaxs, gm_);
 			g_mins = { mins.x - subMins[0], mins.y - subMins[1], mins.z - subMins[2] };
 			g_maxs = { maxs.x + addMaxs[0], maxs.y + addMaxs[1], maxs.z + addMaxs[2] };
 			g_override = true;
@@ -168,6 +168,13 @@ public:
 	{
 		void* helper = *g_moveHelper;
 		reinterpret_cast<AddToTouchedFn>((*reinterpret_cast<void***>(helper))[kVT_IMoveHelper_AddToTouched])(helper, &tr, velocity);
+	}
+
+	void Hull(float mins[3], float maxs[3]) override
+	{
+		const Vec3 lo = ::msf::Hull(oGetPlayerMins, gm_), hi = ::msf::Hull(oGetPlayerMaxs, gm_);
+		mins[0] = lo.x; mins[1] = lo.y; mins[2] = lo.z;
+		maxs[0] = hi.x; maxs[1] = hi.y; maxs[2] = hi.z;
 	}
 
 private:
@@ -369,7 +376,7 @@ void SetSettings(const MsfSettings& s, bool log)
 {
 	const MsfSettings& o = g_settings;
 	if (s.known == o.known && (!s.known || (s.bumpcount == o.bumpcount && s.retrace == o.retrace
-			&& s.noclipWorkaround == o.noclipWorkaround && s.windowsServer == o.windowsServer)))
+			&& s.noclipWorkaround == o.noclipWorkaround && s.windowsServer == o.windowsServer && s.sourceJump == o.sourceJump)))
 		return;
 	g_settings = s;
 	if (!log) return;
@@ -387,8 +394,9 @@ void Describe(char* buf, size_t size)
 {
 	const MsfSettings& s = g_settings;
 	if (!s.known) snprintf(buf, size, "off (server has no momsurffix2)");
-	else snprintf(buf, size, "%sbumpcount %d, retrace length %g, noclip workaround %d%s", g_attached ? "" : "unavailable, server: ",
-		s.bumpcount, s.retrace, s.noclipWorkaround ? 1 : 0, s.windowsServer ? ", windows server" : "");
+	else snprintf(buf, size, "%sbumpcount %d, retrace length %g, noclip workaround %d%s%s", g_attached ? "" : "unavailable, server: ",
+		s.bumpcount, s.retrace, s.noclipWorkaround ? 1 : 0, s.windowsServer ? ", windows server" : "",
+		s.sourceJump ? ", bevel and disp fixes" : "");
 }
 
 }

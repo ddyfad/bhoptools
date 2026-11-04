@@ -88,6 +88,8 @@ const RngSettings& TeleportPredict_RngfixSettings();
 // fromCmd: the first command they applied to, INT_MIN for all (and forget earlier ones).
 void TeleportPredict_SetMoveSettings(float runspeed, int landfix, bool easybhop, int fromCmd);
 void TeleportPredict_SetHazeSkip(const std::vector<int>& entities);
+// The server's caps say its landfix is the SourceJump plugin's: bhoptools_move's landfix 3 is then its lift.
+void TeleportPredict_SetSourceJumpLandfix(bool on);
 const MoveSettings& TeleportPredict_MoveSettings();
 
 

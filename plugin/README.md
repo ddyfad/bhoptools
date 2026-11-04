@@ -197,6 +197,13 @@ After `bhoptools_caps` they also get the entities Haze leaves alone, in parts:
 bhoptools_lfskip <session> <total> <offset> <entity>...
 ```
 
+## SourceJump servers
+
+The SourceJump plugin speaks this protocol with its own movement fixes built in, and sets two caps flags this plugin never does. Clients before them test only the bits they know and ignore them.
+
+- 16777216 (`1 << 24`), SourceJump landfix: `bhoptools_move`'s `<landfix>` is then 3 for styles that get the lift and 0 for its `nolandfix` styles (older clients take 3 as off). The lift is a post hook on `CheckJumpButton`, only for a jump with at most one command ended on the ground before it (a bhop on the first ground tick, or a jumpbug): a hull trace from 2 above the origin to 2.1 below must hit, the 1.5 above the hit must be clear, and the origin goes to the hit + 1.5. Until the next jump, or a command that ends a second tick on the ground, boosters are touched from the unlifted position: `trigger_push` without the once flag pushing level or down, and `trigger_multiple` with a repeatable `basevelocity` output on start or end touch, unparented, with `m_vecMaxs - m_vecMins` at most 4 in z (the brush plus a unit each side).
+- 33554432 (`1 << 25`), SourceJump momsurffix: momsurffix2 d0bb295 with `momsurffix_bevel_fix` and `momsurffix_disp_fix` on. The client probes past an axis-aligned hit in the air with a 0.1 smaller hull and past a displacement seam hit with a 0.05 smaller one, and clips against a single plane with `sv_bounce`'s overbounce in the air, as momsurffix2 does.
+
 ## Hold after teleport (betterseg)
 
 [betterseg](https://github.com/dowoge/better-seg)'s `!seg_freeze` holds a player at the checkpoint after a teleport: every command it teleports them back with no velocity and `MOVETYPE_NONE`, until a command with forward or side movement releases them with the checkpoint's velocity. A client that doesn't know keeps predicting the movement and is pulled back a round trip later.

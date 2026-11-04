@@ -15,6 +15,9 @@ struct MsfSettings {
 	float retrace          = 0.2f;
 	bool  noclipWorkaround = true;
 	bool  windowsServer    = false;
+	// The SourceJump plugin's port of momsurffix2 d0bb295: bevel_fix and disp_fix on, and the one-plane
+	// clip in the air, where momsurffix2 has it.
+	bool  sourceJump       = false;
 };
 
 struct MsfMove {
@@ -34,6 +37,8 @@ public:
 	virtual void Trace(const float start[3], const float end[3], const float* subMins, const float* addMaxs,
 	                   etrace::GameTraceX& tr) = 0;
 	virtual void AddToTouched(const etrace::GameTraceX& tr, float* velocity) = 0;
+	// GetPlayerMins and GetPlayerMaxs: the player's current hull.
+	virtual void Hull(float mins[3], float maxs[3]) = 0;
 };
 
 static const float kMsfEpsilon = 1.192092896e-07f;
@@ -131,6 +136,71 @@ inline bool MsfIsValidMovementTrace(MsfWorld& w, const etrace::GameTraceX& tr)
 	etrace::GameTraceX stuck;
 	w.Trace(tr.endpos, tr.endpos, nullptr, nullptr, stuck);
 	return !stuck.startsolid && MsfCloseEnough(stuck.fraction, 1.0f);
+}
+
+inline bool MsfIsAxialNormal(const float n[3])
+{
+	return fabsf(n[0]) == 1.0f || fabsf(n[1]) == 1.0f || fabsf(n[2]) == 1.0f;
+}
+
+// Displacement seam planes have an exactly zero normal component; a sloped triangle's own face practically never does.
+inline bool MsfIsDispSeamNormal(const float n[3])
+{
+	return n[0] == 0.0f || n[1] == 0.0f || n[2] == 0.0f;
+}
+
+// GetVectorDistance, then the unit direction scaled by 1/len, as SourcePawn does it.
+inline float MsfProbeEnd(const float start[3], const float end[3], float extra, float out[3])
+{
+	const float d[3] = { start[0] - end[0], start[1] - end[1], start[2] - end[2] };
+	const float len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+	if (len < kMsfEpsilon) return len;
+	const float inv = 1.0f / len;
+	const float dir[3] = { (end[0] - start[0]) * inv, (end[1] - start[1]) * inv, (end[2] - start[2]) * inv };
+	MsfMA(start, len + extra, dir, out);
+	return len;
+}
+
+// momsurffix2's bevel_fix: box traces at brush joints can report an axis-aligned bevel plane instead of the
+// face hit; a hull 0.1 smaller probing 4 further finds the face.
+inline void MsfFixBevelPlane(MsfWorld& w, const float start[3], const float end[3], etrace::GameTraceX& pm)
+{
+	if (!MsfIsAxialNormal(pm.plane.normal)) return;
+	static const float shrink[3] = { -0.1f, -0.1f, -0.1f };
+	const float extra = 4.0f;
+	float probe[3];
+	const float len = MsfProbeEnd(start, end, extra, probe);
+	if (len < kMsfEpsilon) return;
+	const float hitdist = pm.fraction * len;
+	etrace::GameTraceX tr;
+	memset(&tr, 0, sizeof(tr));
+	w.Trace(start, probe, shrink, shrink, tr);
+	const float trdist = tr.fraction * (len + extra);
+	if (tr.fraction < 1.0f && !tr.startsolid && trdist >= hitdist && trdist - hitdist <= extra && !MsfIsAxialNormal(tr.plane.normal))
+		MsfCopy(tr.plane.normal, pm.plane.normal);
+}
+
+// momsurffix2's disp_fix: the joint planes between nearly flush displacement triangles can win the tie; a hull
+// 0.05 smaller probing up to 32 further finds the face, taken only if it touches the full hull where it stopped.
+inline void MsfFixDispSeamPlane(MsfWorld& w, const float start[3], const float end[3], etrace::GameTraceX& pm)
+{
+	if (!MsfIsDispSeamNormal(pm.plane.normal)) return;
+	static const float shrink[3] = { -0.05f, -0.05f, -0.05f };
+	float mins[3], maxs[3], probe[3];
+	w.Hull(mins, maxs);
+	if (MsfProbeEnd(start, end, 32.0f, probe) < kMsfEpsilon) return;
+	etrace::GameTraceX tr;
+	memset(&tr, 0, sizeof(tr));
+	w.Trace(start, probe, shrink, shrink, tr);
+	if (tr.fraction >= 1.0f || tr.startsolid || tr.dispFlags == 0) return;
+	const float* n = tr.plane.normal;
+	if (MsfIsDispSeamNormal(n)) return;
+	float dist = -tr.plane.dist;
+	for (int i = 0; i < 3; ++i) {
+		const float c = pm.endpos[i] + (mins[i] + maxs[i]) * 0.5f;
+		dist += n[i] * c - fabsf(n[i]) * (maxs[i] - mins[i]) * 0.5f;
+	}
+	if (fabsf(dist) <= 0.1f) MsfCopy(n, pm.plane.normal);
 }
 
 // firstDest/firstTrace are the caller's (WalkMove's first trace, through StepMove); like the plugin, a
@@ -240,11 +310,17 @@ inline int MsfTryPlayerMove(MsfWorld& w, const MsfSettings& s, const MsfMove& m,
 
 		if (firstDest && MsfIsEqual(end, firstDest)) {
 			pm = firstTrace;
+			if (s.sourceJump && pm->fraction < 1.0f && !pm->startsolid && pm->dispFlags != 0)
+				MsfFixDispSeamPlane(w, origin, firstDest, *pm);
 		} else if (stuck_on_ramp && has_valid_plane) {
 			w.Trace(fixed_origin, end, nullptr, nullptr, *pm);
 			MsfCopy(valid_plane, pm->plane.normal);
 		} else {
 			w.Trace(origin, end, nullptr, nullptr, *pm);
+			if (s.sourceJump && pm->fraction < 1.0f && !pm->startsolid) {
+				if (pm->dispFlags != 0) MsfFixDispSeamPlane(w, origin, end, *pm);
+				else if (!m.onGround) MsfFixBevelPlane(w, origin, end, *pm);
+			}
 		}
 
 		if (bumpcount > 0 && !m.onGround && !MsfIsValidMovementTrace(w, *pm)) {
@@ -295,7 +371,7 @@ inline int MsfTryPlayerMove(MsfWorld& w, const MsfSettings& s, const MsfMove& m,
 		MsfCopy(pm->plane.normal, planes[numplanes]);
 		numplanes++;
 
-		if (numplanes == 1 && m.walking && m.onGround) {
+		if (numplanes == 1 && m.walking && (s.sourceJump ? !m.onGround : m.onGround)) {
 			float clipped[3];
 			if (planes[0][2] >= 0.7f) {
 				MsfClipVelocity(s, original_velocity, planes[0], clipped, 1.0f);

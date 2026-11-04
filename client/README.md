@@ -32,6 +32,7 @@ Prediction
   * Restart and start position: `sm_r`, `sm_restart`, `sm_start`, and `sm_sp`, `sm_ss`, `sm_setstart`, `sm_startpoint`.
   * shavit's style runspeed, easybhop, style key blocking, and shavit-syncstyle's autosync.
   * Landfix and autobhop as the server reports them.
+* On SourceJump servers (the SourceJump plugin answers the same protocol), its own landfix and momsurffix: the lift after a bhop or jumpbug, boosters touched from the unlifted position, and momsurffix2's bevel and displacement seam fixes. Only a server that says it runs them gets this; other servers are predicted as before.
 * Chat triggers for the predicted commands above run on the client, through `say` and `say_team`.
 * `bhoptools_predict` is the one switch for all of it. Without the plugin only trigger prediction runs; rngfix and momsurffix2 settings come from the plugin.
 
