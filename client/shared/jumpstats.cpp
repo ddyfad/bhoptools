@@ -1,6 +1,6 @@
 // A port of bhop-get-stats 1.5 and the bgs-jumpstats 3.9 modules that draw for the player themselves,
-// as deployed (bhop-get-stats 5467a29, jumpstats b2a90d6), plus the real gain and ground prestrafe trainer
-// of bhop-get-stats branch sj-beta when the plugin says so. Float math is kept in float, as
+// as deployed (bhop-get-stats 5467a29, jumpstats b2a90d6), plus the real gain, gain modes, compact trainers and
+// ground prestrafe trainer of bhop-get-stats branch sj-beta when the plugin says so. Float math is kept in float, as
 // SourcePawn does it, so the numbers come out the same.
 #include "jumpstats.h"
 #include "speedo.h"
@@ -36,13 +36,18 @@ const uint32_t JHUD_ENABLED = 1u << 0, JHUD_JSS = 1u << 1, JHUD_SYNC = 1u << 2, 
 	SHOWKEYS_ENABLED = 1u << 26, SHOWKEYS_SIMPLE = 1u << 27, SHOWKEYS_UNRELIABLE = 1u << 28,
 	SHOWYAWS_ENABLED = 1u << 29, SPEEDOMETER_SMALL_VELOCITY = 1u << 30, SPEEDOMETER_COMPARISON = 1u << 31;
 const int JHUD_HIDE_JUMP = 1 << 0, JHUD_HIDE_SPEED = 1 << 1, JHUD_HIDE_GAIN = 1 << 2;
-const int PRESTRAFETRAINER_ENABLED = 1 << 0;  // in Bools2
+// Bools2. MMOD_GAIN shows the mmod gain, BOTH_GAIN "old / mmod", neither the old gain. Bits 5-8 are the compact
+// trainers' colour.
+const int PRESTRAFETRAINER_ENABLED = 1 << 0, MMOD_GAIN = 1 << 1, BOTH_GAIN = 1 << 2, TRAINER_COMPACT = 1 << 3,
+	TRAINER_PCT_BELOW = 1 << 4, TRAINER_COLOUR_SHIFT = 5, PRETRAINER_COMPACT = 1 << 9;
+const int TrainerColour_Rainbow = 9;
 
-// bhoptools_jsset cvar bits, which js-enabled-* and js-allow-trainer-* are on. JSCV_REALGAIN isn't a cvar:
-// bhop-get-stats measures gain against the best gain each tick.
+// bhoptools_jsset cvar bits, which js-enabled-* and js-allow-trainer-* are on. The last two aren't cvars:
+// JSCV_REALGAIN is an older plugin's real gain, shown in place of the old one. JSCV_GAINMODES is bhop-get-stats
+// with both gains and Bools2 picking what's shown, sent to clients that say they draw it.
 const int JSCV_JHUD = 1 << 0, JSCV_TRAINER = 1 << 1, JSCV_TRAINER_MEDIUM = 1 << 2, JSCV_TRAINER_FAST = 1 << 3,
 	JSCV_OFFSET = 1 << 4, JSCV_SPEEDOMETER = 1 << 5, JSCV_SSJ = 1 << 6, JSCV_SHOWKEYS = 1 << 7, JSCV_SHOWYAWS = 1 << 8,
-	JSCV_PRETRAINER = 1 << 9, JSCV_REALGAIN = 1 << 10;
+	JSCV_PRETRAINER = 1 << 9, JSCV_REALGAIN = 1 << 10, JSCV_GAINMODES = 1 << 11;
 
 const int kColors[9][3] = {
 	{ 255, 0, 0 }, { 255, 165, 0 }, { 0, 255, 0 }, { 0, 255, 255 }, { 255, 255, 255 },
@@ -98,6 +103,13 @@ int  g_hudMsg = -1, g_textMsg = -1;
 uint32_t BoolSet() { return (uint32_t)g_set[Bools]; }
 bool Has(uint32_t bit) { return (BoolSet() & bit) != 0; }
 bool Cvar(int bit) { return (g_cvars & bit) != 0; }
+bool Has2(int bit) { return (g_set[Bools2] & bit) != 0; }
+// Which gain is shown, as MMOD_GAIN and BOTH_GAIN: an older plugin's real gain stands in for the old one.
+int GainBits()
+{
+	if (Cvar(JSCV_GAINMODES)) return g_set[Bools2] & (MMOD_GAIN | BOTH_GAIN);
+	return Cvar(JSCV_REALGAIN) ? MMOD_GAIN : 0;
+}
 const int* Color(int setting)
 {
 	const int c = setting >= 0 && setting < kSettings ? g_set[setting] : 0;
@@ -108,7 +120,7 @@ const int* Color(int setting)
 struct Bgs {
 	bool  touchesWall, jumpedThisTick, overlap, noPress, sawTurn, sawPress;
 	int   ticksOnGround, strafeTick, syncedTick, jump, strafeCount, turnTick, keyTick, turnDir, cmdNum, yawwingTick;
-	float oldHeight, rawGain, idealGain, trajectory, traveled[2], lastYaw, avgDiffFromPerf, avgAbsoluteJss;
+	float oldHeight, rawGain, mmodGain, idealGain, trajectory, traveled[2], lastYaw, avgDiffFromPerf, avgAbsoluteJss;
 	float lastNonZeroMove[2], lastJumpPosition[3], lastVeer, jumpPeak;
 } g_bgs;
 
@@ -122,6 +134,12 @@ int   g_lastOffset, g_repeatedOffsets;
 int   g_offsetHistory[OFFSETS_MAX_FRAME], g_currentFrame;
 float g_trainerNumber, g_lastAverage, g_trainerBar[3];
 int   g_trainerCmd;
+// The compact strafe trainer's smoothed jss and the compact prestrafe trainer's smoothed value and pace; jss and
+// value are -1 until the first sample.
+float g_compactJss = -1.0f, g_compactPreValue = -1.0f, g_compactPrePace;
+// The prestrafe trainer's sums over the trainer speed.
+float g_preValueSum, g_prePaceSum;
+int   g_preSamples;
 float g_currentSpeed;
 int   g_speedDirection, g_speedTick, g_yawTick;
 int   g_keysCmd, g_keysLastTurn, g_keysLastButtons;
@@ -254,9 +272,14 @@ int PercentageColorIdx(float gain, bool strict)
 	return GainReallyBad;
 }
 
-// colors.sp's GetGainColorIdx, for real gain
+// colors.sp's GetGainColorIdx, for the mmod gain: the colour of the old gain it converts to (per tick
+// mmod = 1 - (1 - old)^2). An older plugin's real gain had steps of its own.
 int GainColorIdx(float gain)
 {
+	if (Cvar(JSCV_GAINMODES)) {
+		if (gain > 100.0f) return GainReallyBad;
+		return PercentageColorIdx(100.0f * (1.0f - sqrtf(1.0f - gain / 100.0f)), true);
+	}
 	if (gain >= 93.0f) return GainReallyGood;
 	if (gain >= 88.0f) return GainGood;
 	if (gain >= 85.0f) return GainMeh;
@@ -287,17 +310,18 @@ void JhudFirst(int speed)
 	ShowHud(HudJhud, Color(SpeedColorIdx(1, speed)), 1.0f, 1, message);
 }
 
-void Jhud(int jump, int speed, float gain, float sync, float jss, float absJss)
+void Jhud(int jump, int speed, float gain, float mmod, float sync, float jss, float absJss)
 {
 	if (!Cvar(JSCV_JHUD) || !Has(JHUD_ENABLED)) return;
 	if (jump > g_set[JhudCutOff] && g_set[JhudCutOff] != 0) return;
 
-	const bool realGain = Cvar(JSCV_REALGAIN);
-	int idx = jump <= 16 && jump <= g_set[JhudSpeedColorsJump] ? SpeedColorIdx(jump, speed) : realGain ? GainColorIdx(gain) : PercentageColorIdx(gain, true);
+	const int bits = GainBits();
+	// one colour per hud line, so "both" is coloured by the old gain
+	int idx = jump <= 16 && jump <= g_set[JhudSpeedColorsJump] ? SpeedColorIdx(jump, speed) : (bits & MMOD_GAIN) ? GainColorIdx(mmod) : PercentageColorIdx(gain, true);
 	const int hidden = g_set[JhudHidden];
 	// jss only: colour by how far jss is from 100%
 	if (jump > 1 && (hidden & JHUD_HIDE_SPEED) && (hidden & JHUD_HIDE_GAIN) && !Has(JHUD_SYNC) && (BoolSet() & (JHUD_JSS | JHUD_GMOD_JSS))) {
-		const float off = realGain ? 100.0f * sqrtf(1.0f - absJss / 100.0f) : fabsf(jss * 100.0f - 100.0f);
+		const float off = Cvar(JSCV_REALGAIN | JSCV_GAINMODES) ? 100.0f * sqrtf(1.0f - absJss / 100.0f) : fabsf(jss * 100.0f - 100.0f);
 		idx = off <= 3.0f ? GainReallyGood : off <= 10.0f ? GainGood : off <= 25.0f ? GainMeh : GainReallyBad;
 	}
 
@@ -314,7 +338,7 @@ void Jhud(int jump, int speed, float gain, float sync, float jss, float absJss)
 			const char* arrow = absJss == 100 ? "\xE2\x9C\x93" : RoundToFloor(jss * 100.0f) > 100 ? "\xE2\x86\x93" : "\xE2\x86\x91";
 			message += Fmt(bracket ? " (%i%% %s)" : "%i%% %s", RoundToFloor(absJss), arrow);
 		}
-		if (!(hidden & JHUD_HIDE_GAIN)) stats = Fmt("%.2f", gain);
+		if (!(hidden & JHUD_HIDE_GAIN)) stats = (bits & BOTH_GAIN) ? Fmt("%.2f / %.2f", gain, mmod) : Fmt("%.2f", (bits & MMOD_GAIN) ? mmod : gain);
 		if (Has(JHUD_SYNC)) stats += Fmt(" %.2f%%", sync);
 		Trim(stats);
 		if (!stats.empty()) message += (message.empty() ? "" : "\n") + stats;
@@ -369,7 +393,7 @@ void SsjFirst(int speed)
 	g_lastJumpTime = ShavitTime();
 }
 
-void SsjWrite(int jump, int speed, int strafes, float maxHeight, float heightDelta, float gain, float sync, float eff, float jss, float time)
+void SsjWrite(int jump, int speed, int strafes, float maxHeight, float heightDelta, float gain, float mmod, float sync, float eff, float jss, float time)
 {
 	if (Has(SSJ_REPEAT)) {
 		if (g_set[Usage] > 0 && jump % g_set[Usage] != 0) return;
@@ -381,9 +405,17 @@ void SsjWrite(int jump, int speed, int strafes, float maxHeight, float heightDel
 	const bool decimals = Has(SSJ_DECIMALS);
 	std::string m = Fmt("J: %s%i %s| S: %s%i", v, jump, t, v, speed);
 	if (Has(SSJ_GAIN)) {
-		const int c = g_set[Cvar(JSCV_REALGAIN) ? GainColorIdx(gain) : PercentageColorIdx(gain, true)];
-		const char* hex = kColorsHex[c >= 0 && c < 9 ? c : 0];
-		m += decimals ? Fmt(" %s| G: %s%.2f%%", t, hex, gain) : Fmt(" %s| G: %s%i%%", t, hex, RoundToFloor(gain));
+		// each gain in its own colour
+		auto append = [&](float g, int idx) {
+			const int c = g_set[idx];
+			const char* hex = kColorsHex[c >= 0 && c < 9 ? c : 0];
+			m += decimals ? Fmt("%s%.2f%%", hex, g) : Fmt("%s%i%%", hex, RoundToFloor(g));
+		};
+		const int bits = GainBits();
+		m += Fmt(" %s| G: ", t);
+		if (!(bits & MMOD_GAIN)) append(gain, PercentageColorIdx(gain, true));
+		if (bits & BOTH_GAIN) m += Fmt(" %s/ ", t);
+		if (bits & (MMOD_GAIN | BOTH_GAIN)) append(mmod, GainColorIdx(mmod));
 	}
 	if (Has(SSJ_SYNC)) m += decimals ? Fmt(" %s| S: %s%.2f%%", t, v, sync) : Fmt(" %s| S: %s%i%%", t, v, RoundToFloor(sync));
 	if (Has(SSJ_STRAFES)) m += Fmt(" %s| Stf: %s%i", t, v, strafes);
@@ -405,11 +437,11 @@ void SsjWrite(int jump, int speed, int strafes, float maxHeight, float heightDel
 	Chat(m);
 }
 
-void Ssj(int jump, int speed, int strafes, float maxHeight, float heightDelta, float gain, float sync, float eff, float jss)
+void Ssj(int jump, int speed, int strafes, float maxHeight, float heightDelta, float gain, float mmod, float sync, float eff, float jss)
 {
 	if (!Cvar(JSCV_SSJ)) return;
 	const float time = ShavitTime();
-	if (Has(SSJ_ENABLED)) SsjWrite(jump, speed, strafes, maxHeight, heightDelta, gain, sync, eff, jss, time);
+	if (Has(SSJ_ENABLED)) SsjWrite(jump, speed, strafes, maxHeight, heightDelta, gain, mmod, sync, eff, jss, time);
 	g_lastJumpTime = time;
 }
 
@@ -443,6 +475,71 @@ std::string TrainerString(float number, float average)
 	return Fmt("%i\n", RoundFloat(number * 100)) + line + "\n " + vis + " \n" + line;
 }
 
+// h in 0-6, full saturation and value
+void Hue(float h, int rgb[3])
+{
+	const float f = h - floorf(h);
+	const int up = RoundFloat(255.0f * f), down = 255 - up;
+	const int c[6][3] = { { 255, up, 0 }, { down, 255, 0 }, { 0, 255, up }, { 0, down, 255 }, { up, 0, 255 }, { 255, 0, down } };
+	memcpy(rgb, c[(int)floorf(h) % 6], sizeof(c[0]));
+}
+
+void CompactColour(float value, int rgb[3])
+{
+	static const int fixed[8][3] = { { 255, 0, 0 }, { 255, 255, 0 }, { 0, 255, 0 }, { 0, 0, 255 }, { 255, 0, 255 }, { 128, 0, 255 }, { 255, 0, 128 }, { 15, 15, 15 } };
+	const int mode = (g_set[Bools2] >> TRAINER_COLOUR_SHIFT) & 15;
+	if (mode == TrainerColour_Rainbow) {
+		// the plugin cycles on the game time; which colour it starts on doesn't matter
+		const double t = MonotonicSeconds() / 6.0;
+		Hue((float)(t - floor(t)) * 6.0f, rgb);
+	} else if (mode > 0 && mode < TrainerColour_Rainbow) {
+		memcpy(rgb, fixed[mode - 1], sizeof(fixed[0]));
+	} else {
+		// white at 100%, then cyan, green, orange, red the further off it is
+		static const int stops[5][3] = { { 255, 255, 255 }, { 0, 255, 255 }, { 0, 255, 0 }, { 255, 165, 0 }, { 255, 0, 0 } };
+		static const float at[5] = { 0.0f, 0.15f, 0.35f, 0.65f, 1.0f };
+		const float t = fabsf(value - 100.0f) / (value < 100.0f ? 99.0f : 100.0f);
+		int i = 0;
+		while (i < 3 && t > at[i + 1]) ++i;
+		const float f = (t - at[i]) / (at[i + 1] - at[i]);
+		for (int c = 0; c < 3; ++c) rgb[c] = RoundFloat(stops[i][c] + (stops[i + 1][c] - stops[i][c]) * f);
+	}
+}
+
+// trainer.sp's compact look, from 2x74/strafetrainer: a label over a one line gauge, 1-200%, 100% in the middle.
+void DrawCompact(int hud, float x, float value, float hold, int group, const std::string& label)
+{
+	value = value < 1.0f ? 1.0f : value > 200.0f ? 200.0f : value;
+	const int marker = RoundFloat((value - 1.0f) / 199.0f * 20.0f);
+	std::string bar;
+	for (int i = 0; i < 21; ++i) bar += i == marker ? 'o' : i == 10 ? '|' : '-';
+	int rgb[3];
+	CompactColour(value, rgb);
+	ShowHud(hud, x, rgb, hold, group, Has2(TRAINER_PCT_BELOW) ? "[" + bar + "]\n" + label : label + "\n[" + bar + "]");
+}
+
+// The compact trainers are drawn every command from values smoothed over time, as 2x74/strafetrainer does, where
+// the plugin can only send a trainer window's average. This is how far one command moves them, by trainer speed.
+float CompactStep(int which)
+{
+	static const float tau[3] = { 0.15f, 0.1f, 0.06f };
+	return 1.0f - expf(-TickInterval() / tau[which]);
+}
+const float kCompactHold = 0.1f;
+
+int TrainerSpeedIdx()
+{
+	return g_set[TrainerSpeed] >= 0 && g_set[TrainerSpeed] < 3 ? g_set[TrainerSpeed] : Trainer_Slow;
+}
+
+void TrainerSpeeds(int speeds[3])
+{
+	const int rate = TickRate();
+	speeds[0] = RoundToFloor(rate * (TRAINER_FULLUPDATE_TICK_INTERVAL / 100.0f));
+	speeds[1] = RoundToFloor(rate * 0.09f);
+	speeds[2] = RoundToFloor(rate * 0.05f);
+}
+
 void Trainer(bool inbhop, float jss)
 {
 	if (!Cvar(JSCV_TRAINER)) return;
@@ -450,13 +547,23 @@ void Trainer(bool inbhop, float jss)
 	if (!inbhop) {
 		g_trainerNumber = 0.0f;
 		g_trainerBar[0] = g_trainerBar[1] = g_trainerBar[2] = 0.0f;
+		g_compactJss = -1.0f;
 		return;
 	}
 	g_trainerNumber += jss;
 	for (float& b : g_trainerBar) b += jss;
 
+	const int which = TrainerSpeedIdx();
+	const bool compact = Has(TRAINER_ENABLED) && Has2(TRAINER_COMPACT);
+	if (compact) {
+		const float sample = jss * 100.0f;
+		g_compactJss = g_compactJss < 0.0f ? sample : g_compactJss + (sample - g_compactJss) * CompactStep(which);
+		DrawCompact(HudTrainer, -1.0f, g_compactJss, kCompactHold, 0, Fmt("%.1f%%", g_compactJss));
+	}
+
 	const int rate = TickRate();
-	const int speeds[3] = { RoundToFloor(rate * (TRAINER_FULLUPDATE_TICK_INTERVAL / 100.0f)), RoundToFloor(rate * 0.09f), RoundToFloor(rate * 0.05f) };
+	int speeds[3];
+	TrainerSpeeds(speeds);
 	const bool allowed[3] = { true, Cvar(JSCV_TRAINER_MEDIUM), Cvar(JSCV_TRAINER_FAST) };
 	const int cmd = g_trainerCmd;
 	bool due = cmd % TRAINER_FULLUPDATE_TICK_INTERVAL == 0;
@@ -475,8 +582,7 @@ void Trainer(bool inbhop, float jss)
 		}
 	}
 
-	const int which = g_set[TrainerSpeed] >= 0 && g_set[TrainerSpeed] < 3 ? g_set[TrainerSpeed] : Trainer_Slow;
-	if (!Has(TRAINER_ENABLED) || speeds[which] <= 0 || cmd % speeds[which] != 0 || avg[which] == -1.0f) return;
+	if (compact || !Has(TRAINER_ENABLED) || speeds[which] <= 0 || cmd % speeds[which] != 0 || avg[which] == -1.0f) return;
 	const int idx = PercentageColorIdx(avg[which] * 100, Has(TRAINER_STRICT));
 	const float hold = speeds[which] / (rate * 1.0f) + 0.05f;
 	ShowHud(HudTrainer, -1.0f, Color(idx), hold, 0, TrainerString(g_lastAverage, avg[which]));
@@ -533,25 +639,64 @@ float PreValue(const float velocity[3], float forward, float side, float yaw, fl
 	return along > best ? share : 2.0f - share;
 }
 
-// Every tick from PRETRAINER_FROM of the best top speed: the top speed this tick is on pace for, on a bar left of
-// centre turning too slowly, right too fast. Each colour step is PRETRAINER_WHITE on both sides.
+void PreTrainerReset()
+{
+	g_preValueSum = g_prePaceSum = 0.0f;
+	g_preSamples = 0;
+	g_compactPreValue = -1.0f;
+}
+
+// From PRETRAINER_FROM of the best top speed: the top speed each tick is on pace for, averaged over the trainer
+// speed and drawn once a window, so the side only changes when the average does. The bar is left of centre turning
+// too slowly, right too fast; each colour step is PRETRAINER_WHITE on both sides.
 void PreTrainer(bool inbhop)
 {
-	if (!Cvar(JSCV_PRETRAINER) || !(g_set[Bools2] & PRESTRAFETRAINER_ENABLED) || !g_haveMoveCvars) return;
+	if (!Cvar(JSCV_PRETRAINER) || !Has2(PRESTRAFETRAINER_ENABLED) || !g_haveMoveCvars) return;
 	const Move& m = g_move;
-	if (inbhop || (m.buttons & (IN_JUMP | IN_DUCK)) || m.noStats || m.stamina > 0.0f) return;
+	if (inbhop || (m.buttons & (IN_JUMP | IN_DUCK)) || m.noStats || m.stamina > 0.0f) {
+		PreTrainerReset();
+		return;
+	}
 	float pace, top;
 	const float value = PreValue(m.velocity, m.forward, m.side, m.angles[1], m.maxSpeed, g_accelerate * m.surfaceFriction, g_friction * m.surfaceFriction, g_stopspeed, TickInterval() * m.lagged, pace, top);
-	if (value < 0.0f || sqrtf(m.velocity[0] * m.velocity[0] + m.velocity[1] * m.velocity[1]) < top * PRETRAINER_FROM) return;
+	if (value < 0.0f || sqrtf(m.velocity[0] * m.velocity[0] + m.velocity[1] * m.velocity[1]) < top * PRETRAINER_FROM) {
+		PreTrainerReset();
+		return;
+	}
 
-	const float off = (top - pace) / PRETRAINER_WHITE;
-	const float bar = value > 1.0f ? 1.0f + off * 0.1f : 1.0f - off * 0.1f;
-	const float percent = value > 1.0f ? 100.0f + off * 5.0f : 100.0f - off * 10.0f;
-	const int idx = PercentageColorIdx(percent, Has(TRAINER_STRICT));
-	const float hold = TRAINER_FULLUPDATE_TICK_INTERVAL / (TickRate() * 1.0f) + 0.05f;
+	const int which = TrainerSpeedIdx();
 	// the first group whose own HUD is off, else 5
 	const int group = !Has(TRAINER_ENABLED) ? 0 : !Has(JHUD_ENABLED) ? 1 : !Has(OFFSETS_ENABLED) ? 2 : !Has(SHOWKEYS_ENABLED) ? 3 : !Has(SPEEDOMETER_ENABLED) ? 4 : 5;
-	ShowHud(HudPreStrafeTrainer, Color(idx), hold, group, TrainerString(pace / 100.0f, bar));
+	if (Has2(PRETRAINER_COMPACT)) {
+		if (g_compactPreValue < 0.0f) {
+			g_compactPreValue = value;
+			g_compactPrePace = pace;
+		} else {
+			const float k = CompactStep(which);
+			g_compactPreValue += (value - g_compactPreValue) * k;
+			g_compactPrePace += (pace - g_compactPrePace) * k;
+		}
+		const float off = (top - g_compactPrePace) / PRETRAINER_WHITE;
+		const float percent = g_compactPreValue > 1.0f ? 100.0f + off * 5.0f : 100.0f - off * 10.0f;
+		DrawCompact(HudPreStrafeTrainer, HudCoord(HudPreStrafeTrainer, 0), percent, kCompactHold, group, Fmt("%i", RoundFloat(g_compactPrePace)));
+		return;
+	}
+
+	int speeds[3];
+	TrainerSpeeds(speeds);
+	const int window = speeds[which] > 0 ? speeds[which] : 1;
+	g_preValueSum += value;
+	g_prePaceSum += pace;
+	if (++g_preSamples % window != 0) return;
+	const float avgValue = g_preValueSum / window, avgPace = g_prePaceSum / window;
+	g_preValueSum = g_prePaceSum = 0.0f;
+
+	const float off = (top - avgPace) / PRETRAINER_WHITE;
+	const bool fast = avgValue > 1.0f;
+	const float percent = fast ? 100.0f + off * 5.0f : 100.0f - off * 10.0f;
+	const int idx = PercentageColorIdx(percent, Has(TRAINER_STRICT));
+	const float hold = window / (TickRate() * 1.0f) + 0.05f;
+	ShowHud(HudPreStrafeTrainer, Color(idx), hold, group, TrainerString(avgPace / 100.0f, fast ? 1.0f + off * 0.1f : 1.0f - off * 0.1f));
 }
 
 // speedometer.sp and yawdiff.sp, on every 5th and 10th command where the plugins count game frames
@@ -632,10 +777,10 @@ void FirstJumpForward(int speed)
 	g_currentFrame = 0;
 }
 
-void JumpForward(int jump, int speed, int strafes, float maxHeight, float heightDelta, float gain, float sync, float eff, float jss, float absJss)
+void JumpForward(int jump, int speed, int strafes, float maxHeight, float heightDelta, float gain, float mmod, float sync, float eff, float jss, float absJss)
 {
-	Jhud(jump, speed, gain, sync, jss, absJss);
-	Ssj(jump, speed, strafes, maxHeight, heightDelta, gain, sync, eff, jss);
+	Jhud(jump, speed, gain, mmod, sync, jss, absJss);
+	Ssj(jump, speed, strafes, maxHeight, heightDelta, gain, mmod, sync, eff, jss);
 	if (Cvar(JSCV_OFFSET)) g_currentFrame = 0;
 }
 
@@ -643,7 +788,7 @@ void ResetJumpState()
 {
 	Bgs& b = g_bgs;
 	b.jump = b.strafeTick = b.syncedTick = 0;
-	b.rawGain = b.idealGain = b.trajectory = 0.0f;
+	b.rawGain = b.mmodGain = b.idealGain = b.trajectory = 0.0f;
 	b.strafeCount = 0;
 	b.traveled[0] = b.traveled[1] = 0.0f;
 	b.cmdNum = b.yawwingTick = 0;
@@ -699,8 +844,10 @@ void ProcessPostRunCmd(const float origin[3])
 	const float yawDiff = NormalizeAngle(m.angles[1] - b.lastYaw);
 	const float tick = TickInterval();
 	const bool touchesWall = b.touchesWall;
-	const bool realGain = Cvar(JSCV_REALGAIN);
-	float jssThisTick = 0.0f, gaincoeff = 0.0f;
+	// An older plugin's real gain also counted its sync. With either kind of plugin jss is rated by quality.
+	const bool legacyRealGain = Cvar(JSCV_REALGAIN) && !Cvar(JSCV_GAINMODES);
+	const bool jssQuality = Cvar(JSCV_REALGAIN | JSCV_GAINMODES);
+	float jssThisTick = 0.0f, gaincoeff = 0.0f, mmodCoeff = 0.0f;
 
 	if (b.ticksOnGround == 0) {
 		if (origin[2] > b.jumpPeak) b.jumpPeak = origin[2];
@@ -708,9 +855,9 @@ void ProcessPostRunCmd(const float origin[3])
 			const float perfJss = RadToDeg(atanf(30 / Speed2D(velocity)));
 			const float finalJss = fabsf(yawDiff / perfJss);
 			b.avgDiffFromPerf += finalJss;
-			if (realGain) {
-				const float jssQuality = 1.0f - (1.0f - finalJss) * (1.0f - finalJss);
-				b.avgAbsoluteJss += jssQuality > 0.0f ? 100.0f * jssQuality : 0.0f;
+			if (jssQuality) {
+				const float quality = 1.0f - (1.0f - finalJss) * (1.0f - finalJss);
+				b.avgAbsoluteJss += quality > 0.0f ? 100.0f * quality : 0.0f;
 			} else {
 				b.avgAbsoluteJss += 100 - fabsf((finalJss * 100.0f) - 100);
 			}
@@ -764,18 +911,19 @@ void ProcessPostRunCmd(const float origin[3])
 		if (wishspeed > 0.01f) {
 			const float wishspd = wishspeed > 30.0f ? 30.0f : wishspeed;
 			const float currentgain = velocity[0] * wishdir[0] + velocity[1] * wishdir[1] + velocity[2] * wishdir[2];
-			if (realGain) {
-				// the engine tops the wishdir component up to wishspd and leaves the rest alone
-				if (currentgain < wishspd) {
-					gaincoeff = (sqrtf(speed * speed - currentgain * currentgain + wishspd * wishspd) - speed) / idealGain;
-					b.syncedTick++;
-				}
-			} else if (currentgain < 30.0f) {
+			if (currentgain < 30.0f) {
 				gaincoeff = (wishspd - fabsf(currentgain)) / wishspd;
-				b.syncedTick++;
+				if (!legacyRealGain) b.syncedTick++;
+			}
+			// mmod gain: the engine tops the wishdir component up to wishspd and leaves the rest alone
+			if (currentgain < wishspd) {
+				mmodCoeff = (sqrtf(speed * speed - currentgain * currentgain + wishspd * wishspd) - speed) / idealGain;
+				if (legacyRealGain) b.syncedTick++;
 			}
 			if (touchesWall && gaincoeff > 0.5f) gaincoeff = fabsf(gaincoeff - 1.0f);
-			b.rawGain += realGain ? gaincoeff * idealGain : gaincoeff;
+			if (touchesWall && mmodCoeff > 0.5f) mmodCoeff = fabsf(mmodCoeff - 1.0f);
+			b.rawGain += gaincoeff;
+			b.mmodGain += mmodCoeff * idealGain;
 		}
 		b.cmdNum++;
 	}
@@ -793,24 +941,23 @@ void ProcessPostRunCmd(const float origin[3])
 			FirstJumpForward(RoundToFloor(Speed2D(velocity)));
 		} else {
 			const int strafeTick = b.strafeTick;
-			float coeffsum;
-			if (realGain) {
-				coeffsum = 100.0f * b.rawGain / b.idealGain;
-			} else {
-				coeffsum = b.rawGain;
-				coeffsum /= strafeTick;
-				coeffsum *= 100.0f;
-			}
+			float coeffsum = b.rawGain;
+			coeffsum /= strafeTick;
+			coeffsum *= 100.0f;
+			float mmod = 100.0f * b.mmodGain / b.idealGain;
+			// the older plugin's real gain was its only gain, efficiency included
+			if (legacyRealGain) coeffsum = mmod;
 			float distance = sqrtf(b.traveled[0] * b.traveled[0] + b.traveled[1] * b.traveled[1]);
 			if (distance > b.trajectory) distance = b.trajectory;
 			float efficiency = 0.0f;
 			if (distance > 0.0f) efficiency = coeffsum * distance / b.trajectory;
 			coeffsum = RoundToFloor(coeffsum * 100.0f + 0.5f) / 100.0f;
+			mmod = RoundToFloor(mmod * 100.0f + 0.5f) / 100.0f;
 			efficiency = RoundToFloor(efficiency * 100.0f + 0.5f) / 100.0f;
 			JumpForward(b.jump, RoundToFloor(Speed2D(velocity)), b.strafeCount, b.jumpPeak - b.oldHeight, origin[2] - b.oldHeight,
-				coeffsum, 100.0f * b.syncedTick / strafeTick, efficiency, b.avgDiffFromPerf / strafeTick, b.avgAbsoluteJss / strafeTick);
+				coeffsum, mmod, 100.0f * b.syncedTick / strafeTick, efficiency, b.avgDiffFromPerf / strafeTick, b.avgAbsoluteJss / strafeTick);
 		}
-		b.rawGain = b.idealGain = 0.0f;
+		b.rawGain = b.mmodGain = b.idealGain = 0.0f;
 		b.strafeTick = b.syncedTick = b.strafeCount = 0;
 		b.oldHeight = origin[2];
 		b.trajectory = 0.0f;
