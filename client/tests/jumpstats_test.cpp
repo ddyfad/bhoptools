@@ -88,13 +88,18 @@ static void Step(bool onGround, int buttons, float side, float yaw, float vy, fl
 // Prestrafing with W+A at 100 tick, sv_accelerate 5, sv_friction 4, sv_stopspeed 75 and maxspeed 250, worked
 // out here in double as CGameMovement does it: Friction, then Accelerate towards 45 degrees left of the view.
 // The view keeps the wish direction at `share` of the best angle off the velocity, acos((W - a) / speed).
-// Returns the speed after the last move and leaves what was drawn in g_sent, and in g_expect what the last
-// tick gained over the most it could, mirrored above 1 when the angle was too wide.
+// Returns the speed after the last move and leaves what was drawn in g_sent, in g_expect what the last tick
+// gained over the most it could, mirrored above 1 when the angle was too wide, in g_last the last move and in
+// g_above how many ticks started at or above 93% of the best top speed.
 static double g_expect;
-static double Prestrafe(double share, int ticks)
+static js::Move g_last;
+static int g_above;
+static double Prestrafe(double share, int ticks, double start = 250.0)
 {
 	const double pi = 3.14159265358979323846, W = 250.0, a = 5.0 * 0.01 * W;
-	double vx = 250.0, vy = 0.0;
+	const double top = W * sqrt((5.0 / 4.0) * (2.0 - 5.0 * 0.01) / (2.0 - 4.0 * 0.01));
+	double vx = start, vy = 0.0;
+	g_above = 0;
 	for (int i = 0; i < ticks; ++i) {
 		js::Move m = {};
 		m.forward = 400.0f;
@@ -104,6 +109,7 @@ static double Prestrafe(double share, int ticks)
 		m.velocity[1] = (float)vy;
 
 		double speed = sqrt(vx * vx + vy * vy);
+		g_above += speed >= 0.93 * top;
 		const double control = speed < 75.0 ? 75.0 : speed;
 		const double after = speed - control * 4.0 * 0.01;
 		vx *= after / speed;
@@ -113,6 +119,7 @@ static double Prestrafe(double share, int ticks)
 		const double wish = atan2(vy, vx) + share * best;
 		m.angles[1] = (float)((wish - pi / 4) * 180.0 / pi);
 		Run(m);
+		g_last = m;
 
 		const double c = vx * cos(wish) + vy * sin(wish);
 		const double add = c < W - a ? a : W - c;
@@ -137,6 +144,16 @@ static float FloatAt(const std::string& s, size_t at)
 // The text of a HudMsg, after channel, x, y, two colours, the effect and four floats.
 static std::string HudText(const Sent& s) { return s.data.substr(1 + 8 + 8 + 1 + 16, s.data.size() - 34 - 1); }
 static std::string ChatText(const Sent& s) { return s.data.substr(2, s.data.size() - 3); }
+
+// The trainer bar's marker in half slots from the left, 25 the centre.
+static int Marker(const std::string& text)
+{
+	size_t at = text.find('\n', text.find('\n') + 1) + 2;
+	for (int i = 0; at < text.size() && text[at] != '\n'; ++i, ++at) {
+		if (text[at] != ' ') return 2 * i + (text.compare(at, 3, "\xE2\x96\x95") == 0);
+	}
+	return -1;
+}
 
 int main()
 {
@@ -235,33 +252,42 @@ int main()
 	if (g_sent.size() == 2) CHECK(HudText(g_sent[0]).find("\n53.33 100.00%") != std::string::npos);
 
 	// Prestrafe trainer. Holding the best angle every tick, the speed settles at shavit's MaxPrestrafe,
-	// W * sqrt((A / F) * (2 - A dt) / (2 - F dt)), and the trainer reads 100, drawn every command on the
-	// first group whose own HUD is off.
+	// W * sqrt((A / F) * (2 - A dt) / (2 - F dt)). From 93% of it, and not below, the trainer shows the top speed
+	// each tick is on pace for, white, drawn every command on the first group whose own HUD is off.
 	Settings(defaults, 511 | JSCV_PRETRAINER, PRESTRAFETRAINER_ENABLED, true);
 	g_sent.clear();
 	const double maxPrestrafe = 250.0 * sqrt((5.0 / 4.0) * (2.0 - 5.0 * 0.01) / (2.0 - 4.0 * 0.01));
 	double speed = Prestrafe(1.0, 390);
 	CHECK(fabs(speed - maxPrestrafe) < 0.01);
-	CHECK(g_sent.size() == 390);
+	CHECK(g_above > 0 && g_above < 390 && (int)g_sent.size() == g_above);
 	if (!g_sent.empty()) {
 		const Sent& hud = g_sent.back();
 		CHECK(hud.id == 21 && hud.data[0] == 0);
 		CHECK(FloatAt(hud.data, 1) == -1.0f);
 		CHECK((unsigned char)hud.data[9] == 255 && (unsigned char)hud.data[10] == 255 && (unsigned char)hud.data[11] == 255);
 		CHECK(FloatAt(hud.data, 1 + 8 + 8 + 1 + 8) == 13 / 100.0f + 0.05f);
-		CHECK(HudText(hud).compare(0, 4, "100\n") == 0);
+		CHECK(HudText(hud).compare(0, 4, Fmt("%i\n", RoundFloat((float)maxPrestrafe))) == 0);
+		CHECK(abs(Marker(HudText(hud)) - 25) <= 1);
 	}
-	// Any other angle ends slower and reads as the share of the best gain it got, under 100 turning too
-	// slowly, mirrored over 100 turning too fast. 80% of the angle costs far more than 120%.
-	g_sent.clear();
-	CHECK(Prestrafe(0.8, 390) < maxPrestrafe - 0.5);
-	const double slow = g_expect;
-	CHECK(slow < 1.0);
-	CHECK(!g_sent.empty() && HudText(g_sent.back()).find(Fmt("%i\n", RoundFloat((float)slow * 100))) == 0);
-	g_sent.clear();
-	CHECK(Prestrafe(1.2, 390) < maxPrestrafe - 0.5);
-	CHECK(g_expect > 1.0 && 1.0 - slow > 3.0 * (g_expect - 1.0));
-	CHECK(!g_sent.empty() && HudText(g_sent.back()).find(Fmt("%i\n", RoundFloat((float)g_expect * 100))) == 0);
+	// Held at any angle, the speed settles at the pace the trainer showed for the gain share the ticks get there.
+	// The marker is left of centre turning too slowly, right too fast; white only within 1.5 u/s of the best.
+	const struct { double share; int side; } held[] = { { 0.999, -1 }, { 0.998, -1 }, { 0.995, -1 }, { 0.99, -1 }, { 0.98, -1 }, { 0.95, -1 }, { 0.8, -1 }, { 0.5, -1 }, { 1.02, 1 }, { 1.05, 1 }, { 1.1, 1 }, { 1.2, 1 }, { 1.5, 1 } };
+	for (const auto& h : held) {
+		g_sent.clear();
+		speed = Prestrafe(h.share, 390, 275.0);
+		float pace, top;
+		const float value = js::PreValue(g_last.velocity, g_last.forward, g_last.side, g_last.angles[1], 250.0f, 5.0f, 4.0f, 75.0f, 0.01f, pace, top);
+		CHECK(fabs(value - g_expect) < 0.0002);
+		CHECK(fabs(pace - speed) < 0.02);
+		CHECK(fabs(top - maxPrestrafe) < 0.01);
+		CHECK((int)g_sent.size() == g_above);
+		if (speed < 0.93 * maxPrestrafe) continue;
+		const Sent& hud = g_sent.back();
+		CHECK(HudText(hud).compare(0, 4, Fmt("%i\n", RoundFloat(pace))) == 0);
+		CHECK((Marker(HudText(hud)) - 25) * h.side >= 1);
+		const bool white = (unsigned char)hud.data[9] == 255 && (unsigned char)hud.data[10] == 255 && (unsigned char)hud.data[11] == 255;
+		CHECK(white == (top - pace <= 1.5f));
+	}
 
 	// Ticks from WR prestrafes on the beta servers (maxspeed 260), whose next recorded speed the engine steps
 	// reproduce: the velocity before the move, view yaw, move keys, and the value worked out in double.
@@ -278,14 +304,16 @@ int main()
 	};
 	for (const ReplayTick& t : ticks) {
 		const float v[3] = { t.vx, t.vy, 0.0f };
-		CHECK(fabs(js::PreValue(v, t.forward, t.side, t.yaw, 260.0f, 5.0f, 4.0f, 75.0f, 0.01f) - t.value) < 0.0002);
+		float pace, top;
+		CHECK(fabs(js::PreValue(v, t.forward, t.side, t.yaw, 260.0f, 5.0f, 4.0f, 75.0f, 0.01f, pace, top) - t.value) < 0.0002);
+		CHECK(fabs(top - 289.95f) < 0.01f);
 	}
 
 	Settings(defaults | TRAINER_ENABLED, 511 | JSCV_PRETRAINER, PRESTRAFETRAINER_ENABLED, true);
 	g_sent.clear();
-	Prestrafe(1.0, 13);
+	Prestrafe(1.0, 13, 275.0);
 	CHECK(g_sent.size() == 13 && g_sent[0].data[0] == 2);
-	// Pushing straight ahead below the speed where turning pays reads 100.
+	// Pushing straight ahead below the speed where turning pays: under 93%, nothing.
 	g_sent.clear();
 	{
 		js::Move m = {};
@@ -295,7 +323,7 @@ int main()
 		m.onGround = true;
 		Run(m);
 	}
-	CHECK(g_sent.size() == 1 && HudText(g_sent[0]).compare(0, 4, "100\n") == 0);
+	CHECK(g_sent.empty());
 	// Jumping, in the air, with stamina left, without move keys, off in Bools2 or from a plugin that doesn't
 	// send the cvars: nothing.
 	g_sent.clear();
@@ -316,9 +344,9 @@ int main()
 	CHECK(drawn == 0);
 	Settings(defaults, 511 | JSCV_PRETRAINER, 0, true);
 	g_sent.clear();
-	Prestrafe(1.0, 26);
+	Prestrafe(1.0, 26, 275.0);
 	Settings(defaults, 511 | JSCV_PRETRAINER, PRESTRAFETRAINER_ENABLED);
-	Prestrafe(1.0, 26);
+	Prestrafe(1.0, 26, 275.0);
 	CHECK(g_sent.empty());
 
 	// A new session draws nothing until settings come again.

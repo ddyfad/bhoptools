@@ -68,7 +68,8 @@ const int MIN_UPDATE_RATE = 50;
 const int TRAINER_FULLUPDATE_TICK_INTERVAL = 13;
 const int TRAINER_SIZE = 13;
 const float TRAINER_MIN_GAIN = 0.3f;
-const float PRETRAINER_STRETCH = 5.0f;
+const float PRETRAINER_FROM = 0.93f;
+const float PRETRAINER_WHITE = 1.5f;
 const int IN_JUMP = 1 << 1, IN_DUCK = 1 << 2, IN_FORWARD = 1 << 3, IN_BACK = 1 << 4, IN_LEFT = 1 << 7, IN_RIGHT = 1 << 8,
 	IN_MOVELEFT = 1 << 9, IN_MOVERIGHT = 1 << 10;
 
@@ -481,10 +482,21 @@ void Trainer(bool inbhop, float jss)
 	ShowHud(HudTrainer, -1.0f, Color(idx), hold, 0, TrainerString(g_lastAverage, avg[which]));
 }
 
+// pretrainer.sp: the speed v that a tick getting `share` of its most leaves at v: v = after + share * (most - after),
+// with after = v * (1 - loss). Under sv_stopspeed is left out, far below where the trainer shows.
+float PrePace(float share, float push, float best, float loss)
+{
+	if (share <= 0.0f) return 0.0f;
+	const float keep = 1.0f - loss;
+	float pace = share * push / loss;
+	if (keep * pace > best) pace = share * sqrtf((2.0f * push * best + push * push) / (loss * (loss + 2.0f * share * keep)));
+	return pace;
+}
+
 // pretrainer.sp: this ground tick's speed gain over the most it could gain, as Friction then Accelerate give it.
 // 1 is the most, under is the wish direction too close to the velocity, over is the same loss with it too far
-// off; -1 without move keys.
-float PreValue(const float velocity[3], float forward, float side, float yaw, float maxspeed, float accelerate, float friction, float stopspeed, float frametime)
+// off; -1 without move keys. pace is the top speed for this tick's share every tick, top the same at the most.
+float PreValue(const float velocity[3], float forward, float side, float yaw, float maxspeed, float accelerate, float friction, float stopspeed, float frametime, float& pace, float& top)
 {
 	float wishspeed = sqrtf(forward * forward + side * side);
 	if (maxspeed != 0.0f && wishspeed > maxspeed) wishspeed = maxspeed;
@@ -516,24 +528,30 @@ float PreValue(const float velocity[3], float forward, float side, float yaw, fl
 	const float most = after <= best ? after + push : sqrtf(after * after + 2.0f * push * best + push * push);
 
 	const float share = (gained - after) / (most - after);
+	pace = PrePace(share, push, best, friction * frametime);
+	top = PrePace(1.0f, push, best, friction * frametime);
 	return along > best ? share : 2.0f - share;
 }
 
-// Every tick, the bar and colour PRETRAINER_STRETCH times as far from 100 as the number.
+// Every tick from PRETRAINER_FROM of the best top speed: the top speed this tick is on pace for, on a bar left of
+// centre turning too slowly, right too fast. Each colour step is PRETRAINER_WHITE on both sides.
 void PreTrainer(bool inbhop)
 {
 	if (!Cvar(JSCV_PRETRAINER) || !(g_set[Bools2] & PRESTRAFETRAINER_ENABLED) || !g_haveMoveCvars) return;
 	const Move& m = g_move;
 	if (inbhop || (m.buttons & (IN_JUMP | IN_DUCK)) || m.noStats || m.stamina > 0.0f) return;
-	const float value = PreValue(m.velocity, m.forward, m.side, m.angles[1], m.maxSpeed, g_accelerate * m.surfaceFriction, g_friction * m.surfaceFriction, g_stopspeed, TickInterval() * m.lagged);
-	if (value < 0.0f) return;
+	float pace, top;
+	const float value = PreValue(m.velocity, m.forward, m.side, m.angles[1], m.maxSpeed, g_accelerate * m.surfaceFriction, g_friction * m.surfaceFriction, g_stopspeed, TickInterval() * m.lagged, pace, top);
+	if (value < 0.0f || sqrtf(m.velocity[0] * m.velocity[0] + m.velocity[1] * m.velocity[1]) < top * PRETRAINER_FROM) return;
 
-	const float stretched = 1.0f + (value - 1.0f) * PRETRAINER_STRETCH;
-	const int idx = PercentageColorIdx(stretched * 100, Has(TRAINER_STRICT));
+	const float off = (top - pace) / PRETRAINER_WHITE;
+	const float bar = value > 1.0f ? 1.0f + off * 0.1f : 1.0f - off * 0.1f;
+	const float percent = value > 1.0f ? 100.0f + off * 5.0f : 100.0f - off * 10.0f;
+	const int idx = PercentageColorIdx(percent, Has(TRAINER_STRICT));
 	const float hold = TRAINER_FULLUPDATE_TICK_INTERVAL / (TickRate() * 1.0f) + 0.05f;
 	// the first group whose own HUD is off, else 5
 	const int group = !Has(TRAINER_ENABLED) ? 0 : !Has(JHUD_ENABLED) ? 1 : !Has(OFFSETS_ENABLED) ? 2 : !Has(SHOWKEYS_ENABLED) ? 3 : !Has(SPEEDOMETER_ENABLED) ? 4 : 5;
-	ShowHud(HudPreStrafeTrainer, Color(idx), hold, group, TrainerString(value, stretched));
+	ShowHud(HudPreStrafeTrainer, Color(idx), hold, group, TrainerString(pace / 100.0f, bar));
 }
 
 // speedometer.sp and yawdiff.sp, on every 5th and 10th command where the plugins count game frames
