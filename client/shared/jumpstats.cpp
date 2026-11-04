@@ -1,6 +1,6 @@
 // A port of bhop-get-stats 1.5 and the bgs-jumpstats 3.9 modules that draw for the player themselves,
-// as deployed (bhop-get-stats 5467a29, jumpstats b2a90d6), plus the real gain and prestrafe trainer of
-// bhop-get-stats branch sj-beta (e4cfa5c) when the plugin says so. Float math is kept in float, as
+// as deployed (bhop-get-stats 5467a29, jumpstats b2a90d6), plus the real gain and ground prestrafe trainer
+// of bhop-get-stats branch sj-beta when the plugin says so. Float math is kept in float, as
 // SourcePawn does it, so the numbers come out the same.
 #include "jumpstats.h"
 #include "speedo.h"
@@ -68,7 +68,7 @@ const int MIN_UPDATE_RATE = 50;
 const int TRAINER_FULLUPDATE_TICK_INTERVAL = 13;
 const int TRAINER_SIZE = 13;
 const float TRAINER_MIN_GAIN = 0.3f;
-const int IN_JUMP = 1 << 1, IN_FORWARD = 1 << 3, IN_BACK = 1 << 4, IN_LEFT = 1 << 7, IN_RIGHT = 1 << 8,
+const int IN_JUMP = 1 << 1, IN_DUCK = 1 << 2, IN_FORWARD = 1 << 3, IN_BACK = 1 << 4, IN_LEFT = 1 << 7, IN_RIGHT = 1 << 8,
 	IN_MOVELEFT = 1 << 9, IN_MOVERIGHT = 1 << 10;
 
 // What the plugin sent.
@@ -82,6 +82,9 @@ std::string g_colorsIn;
 int  g_colorsLen = -1;
 bool g_hasComparison;
 float g_comparison;
+// sv_accelerate, sv_friction and sv_stopspeed, for the prestrafe trainer
+bool  g_haveMoveCvars;
+float g_accelerate, g_friction, g_stopspeed;
 // shavit's time after command g_timeCmd and what it adds each command after.
 bool   g_haveTime;
 int    g_timeCmd;
@@ -117,8 +120,10 @@ int   g_lastOffset, g_repeatedOffsets;
 int   g_offsetHistory[OFFSETS_MAX_FRAME], g_currentFrame;
 float g_trainerNumber, g_lastAverage, g_trainerBar[3];
 int   g_trainerCmd;
-float g_currentSpeed, g_preSpeed;
-int   g_speedDirection, g_speedTick, g_yawTick, g_preTick;
+float g_preNumber, g_preLastAverage, g_preBar[3];
+int   g_preCmd;
+float g_currentSpeed;
+int   g_speedDirection, g_speedTick, g_yawTick;
 int   g_keysCmd, g_keysLastTurn, g_keysLastButtons;
 float g_keysLastYaw;
 bool  g_keysDelayed;
@@ -477,19 +482,71 @@ void Trainer(bool inbhop, float jss)
 	ShowHud(HudTrainer, -1.0f, Color(idx), hold, 0, TrainerString(g_lastAverage, avg[which]));
 }
 
-// pretrainer.sp: the last ground speed, redrawn every SPEED_UPDATE_INTERVAL commands
-void PreTrainer(bool inbhop, float speed2d)
+// pretrainer.sp: the angle between velocity and wish direction each ground tick as a share of the angle that
+// gains the most speed, -1 with no move keys or while pushing straight ahead gains the most
+float PreShare(const float velocity[3], float forward, float side, float yaw, float maxspeed, float accelerate, float friction, float stopspeed, float frametime)
 {
-	if (!Cvar(JSCV_PRETRAINER) || ++g_preTick % SPEED_UPDATE_INTERVAL != 0) return;
-	g_preTick = 0;
-	if (!inbhop) g_preSpeed = speed2d;
-	const int idx = g_preSpeed > 270.0f ? GainReallyGood : g_preSpeed > 260.0f ? GainGood : GainReallyBad;
-	const int speed = RoundToFloor(g_preSpeed);
-	if (!(g_set[Bools2] & PRESTRAFETRAINER_ENABLED)) return;
-	const std::string m = speed < 10 ? Fmt("   %i", speed) : speed < 100 ? Fmt("  %i", speed) : speed < 1000 ? Fmt(" %i", speed) : Fmt("%i", speed);
+	float wishspeed = sqrtf(forward * forward + side * side);
+	if (maxspeed != 0.0f && wishspeed > maxspeed) wishspeed = maxspeed;
+	if (wishspeed < 0.01f) return -1.0f;
+
+	float speed = sqrtf(velocity[0] * velocity[0] + velocity[1] * velocity[1]);
+	if (speed >= 0.1f) {
+		const float control = speed < stopspeed ? stopspeed : speed;
+		speed -= control * friction * frametime;
+	}
+	float along = wishspeed - accelerate * frametime * wishspeed;
+	if (along < 0.0f) along = 0.0f;
+	if (speed <= along) return -1.0f;
+
+	const float rad = (yaw * 3.14159265358979323846f) / 180.0f;
+	const float wishx = cosf(rad) * forward + sinf(rad) * side;
+	const float wishy = sinf(rad) * forward - cosf(rad) * side;
+	float cosine = (velocity[0] * wishx + velocity[1] * wishy) / (sqrtf(velocity[0] * velocity[0] + velocity[1] * velocity[1]) * sqrtf(wishx * wishx + wishy * wishy));
+	if (cosine > 1.0f) cosine = 1.0f;
+	else if (cosine < -1.0f) cosine = -1.0f;
+	return acosf(cosine) / acosf(along / speed);
+}
+
+void PreTrainer(bool inbhop, float surfaceFriction)
+{
+	if (!Cvar(JSCV_PRETRAINER)) return;
+	++g_preCmd;
+	const Move& m = g_move;
+	float share = -1.0f;
+	if (g_haveMoveCvars && !inbhop && !(m.buttons & (IN_JUMP | IN_DUCK)) && !m.noStats)
+		share = PreShare(m.velocity, m.forward, m.side, m.angles[1], m.maxSpeed, g_accelerate * surfaceFriction, g_friction * surfaceFriction, g_stopspeed, TickInterval() * m.lagged);
+	if (share < 0.0f) {
+		g_preNumber = 0.0f;
+		g_preBar[0] = g_preBar[1] = g_preBar[2] = 0.0f;
+		return;
+	}
+	g_preNumber += share;
+	for (float& b : g_preBar) b += share;
+
+	const int cmd = g_preCmd;
+	if (cmd % TRAINER_FULLUPDATE_TICK_INTERVAL == 0) {
+		g_preLastAverage = g_preNumber / TRAINER_FULLUPDATE_TICK_INTERVAL;
+		g_preNumber = 0.0f;
+	}
+	const int rate = TickRate();
+	const int speeds[3] = { RoundToFloor(rate * (TRAINER_FULLUPDATE_TICK_INTERVAL / 100.0f)), RoundToFloor(rate * 0.09f), RoundToFloor(rate * 0.05f) };
+	const bool allowed[3] = { true, Cvar(JSCV_TRAINER_MEDIUM), Cvar(JSCV_TRAINER_FAST) };
+	float avg[3] = { -1.0f, -1.0f, -1.0f };
+	for (int i = 0; i < 3; ++i) {
+		if (allowed[i] && speeds[i] > 0 && cmd % speeds[i] == 0) {
+			avg[i] = g_preBar[i] / speeds[i];
+			g_preBar[i] = 0.0f;
+		}
+	}
+
+	const int which = g_set[TrainerSpeed] >= 0 && g_set[TrainerSpeed] < 3 ? g_set[TrainerSpeed] : Trainer_Slow;
+	if (!(g_set[Bools2] & PRESTRAFETRAINER_ENABLED) || avg[which] == -1.0f) return;
+	const int idx = PercentageColorIdx(avg[which] * 100, Has(TRAINER_STRICT));
+	const float hold = speeds[which] / (rate * 1.0f) + 0.05f;
 	// the first group whose own HUD is off, else 5
 	const int group = !Has(TRAINER_ENABLED) ? 0 : !Has(JHUD_ENABLED) ? 1 : !Has(OFFSETS_ENABLED) ? 2 : !Has(SHOWKEYS_ENABLED) ? 3 : !Has(SPEEDOMETER_ENABLED) ? 4 : 5;
-	ShowHud(HudPreStrafeTrainer, Color(idx), 0.2f, group, m);
+	ShowHud(HudPreStrafeTrainer, Color(idx), hold, group, TrainerString(g_preLastAverage, avg[which]));
 }
 
 // speedometer.sp and yawdiff.sp, on every 5th and 10th command where the plugins count game frames
@@ -628,7 +685,7 @@ float Normalize(float v[3])
 	return len;
 }
 
-void ProcessPostRunCmd(const float origin[3])
+void ProcessPostRunCmd(const float origin[3], float surfaceFriction)
 {
 	Bgs& b = g_bgs;
 	const Move& m = g_move;
@@ -719,7 +776,7 @@ void ProcessPostRunCmd(const float origin[3])
 	}
 
 	Trainer(b.ticksOnGround == 0, jssThisTick);
-	PreTrainer(b.ticksOnGround == 0, Speed2D(velocity));
+	PreTrainer(b.ticksOnGround == 0, surfaceFriction);
 	b.touchesWall = false;
 
 	if (b.jumpedThisTick) {
@@ -804,6 +861,7 @@ void SetChat(int client, int sayText2)
 }
 
 // bhoptools_jsset <session> <on> <cvars> <channel groups 0-5> <settings 0-14 as %x> [setting 15, Bools2]
+// [sv_accelerate, sv_friction, sv_stopspeed bits]
 void Cmd_Settings(const CCommandX& c)
 {
 	if (!OurSession(c, 3)) return;
@@ -812,6 +870,13 @@ void Cmd_Settings(const CCommandX& c)
 	g_cvars = atoi(c.argv[3]);
 	for (int i = 0; i < 6; ++i) g_channels[i] = atoi(c.argv[4 + i]);
 	for (int i = 0; i < kSettings; ++i) g_set[i] = 10 + i < c.argc ? (int)(uint32_t)strtoul(c.argv[10 + i], nullptr, 16) : 0;
+	g_haveMoveCvars = c.argc >= 10 + kSettings + 3;
+	if (!g_haveMoveCvars) return;
+	float* cvars[3] = { &g_accelerate, &g_friction, &g_stopspeed };
+	for (int i = 0; i < 3; ++i) {
+		const uint32_t bits = (uint32_t)strtoul(c.argv[10 + kSettings + i], nullptr, 16);
+		memcpy(cvars[i], &bits, 4);
+	}
 }
 
 // bhoptools_jscc <session> <length> <start> "<chunk>": ssj's prefix, text and variable colours joined
@@ -907,7 +972,7 @@ void OnJump()
 	b.jumpedThisTick = true;
 }
 
-void PostMove(const float origin[3], const float velocity[3])
+void PostMove(const float origin[3], const float velocity[3], float surfaceFriction)
 {
 	g_inMove = false;
 	if (!g_on) {
@@ -915,7 +980,7 @@ void PostMove(const float origin[3], const float velocity[3])
 		return;
 	}
 	if (g_touched) g_bgs.touchesWall = true;
-	ProcessPostRunCmd(origin);
+	ProcessPostRunCmd(origin, surfaceFriction);
 	Speedometer(velocity);
 	ShowYaws(velocity, g_move.angles[1]);
 }

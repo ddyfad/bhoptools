@@ -39,7 +39,8 @@ struct Move {
 void PreMove(const Move& m);
 // CheckJumpButton jumped; counts only between PreMove and PostMove.
 void OnJump();
-void PostMove(const float origin[3], const float velocity[3]);
+// surfaceFriction is m_surfaceFriction after the move, as jumpstats reads it in the tick forward.
+void PostMove(const float origin[3], const float velocity[3], float surfaceFriction);
 // A predicted checkpoint teleport: Shavit_OnTeleport.
 void OnTeleport();
 

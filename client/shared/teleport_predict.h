@@ -70,6 +70,8 @@ void TeleportPredict_PredLog(const char* fmt, ...)
 float* TeleportPredict_LaggedMovement(void* player);
 float TeleportPredict_TickInterval();
 int TeleportPredict_WaterLevel(void* player);
+// m_surfaceFriction, 1 if it wasn't found.
+float TeleportPredict_SurfaceFriction(void* player);
 // The player's hull traced `distance` down, as rngfix and the landfixes trace; false when nothing can trace.
 bool TeleportPredict_TraceDown(const float origin[3], float distance, bool ducked, bool onGround, bool firstRun, RngTraceResult& tr);
 // Whether the move just predicted teleported the player the way the server's CBaseEntity::Teleport

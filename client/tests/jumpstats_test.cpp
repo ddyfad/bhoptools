@@ -36,8 +36,9 @@ static void Command(std::vector<std::string> args)
 }
 
 // jumpstats' defaults (PushDefault*), with `bools` in place of the default bools. bools2 < 0 leaves
-// setting 15 out, as jumpstats before the prestrafe trainer does.
-static void Settings(uint32_t bools, int cvars = 511, int bools2 = -1)
+// setting 15 out, as jumpstats before the prestrafe trainer does; moveCvars adds sv_accelerate 5,
+// sv_friction 4 and sv_stopspeed 75 after it, as jumpstats with the ground prestrafe trainer does.
+static void Settings(uint32_t bools, int cvars = 511, int bools2 = -1, bool moveCvars = false)
 {
 	char hex[16];
 	std::vector<std::string> a = { "bhoptools_jsset", "7", "1", std::to_string(cvars), "0", "1", "2", "3", "4", "5" };
@@ -47,27 +48,77 @@ static void Settings(uint32_t bools, int cvars = 511, int bools2 = -1)
 		a.push_back(hex);
 	}
 	if (bools2 >= 0) a.push_back(std::to_string(bools2));
+	if (moveCvars) {
+		for (float f : { 5.0f, 4.0f, 75.0f }) {
+			uint32_t bits;
+			memcpy(&bits, &f, 4);
+			snprintf(hex, sizeof(hex), "%x", bits);
+			a.push_back(hex);
+		}
+	}
 	Command(a);
 }
 
 static int g_cmd;
 
+static void Run(js::Move& m)
+{
+	m.cmd = ++g_cmd;
+	m.maxSpeed = 250.0f;
+	m.lagged = 1.0f;
+	js::PreMove(m);
+	if (m.onGround && (m.buttons & IN_JUMP)) js::OnJump();
+	const float origin[3] = { 0, 0, 0 };
+	js::PostMove(origin, m.velocity, 1.0f);
+}
+
 static void Step(bool onGround, int buttons, float side, float yaw, float vy, float vx = 0)
 {
 	js::Move m = {};
-	m.cmd = ++g_cmd;
 	m.buttons = buttons;
 	m.side = side;
 	m.angles[1] = yaw;
 	m.velocity[0] = vx;
 	m.velocity[1] = vy;
 	m.onGround = onGround;
-	m.maxSpeed = 250.0f;
-	m.lagged = 1.0f;
-	js::PreMove(m);
-	if (onGround && (buttons & IN_JUMP)) js::OnJump();
-	const float origin[3] = { 0, 0, 0 };
-	js::PostMove(origin, m.velocity);
+	Run(m);
+}
+
+// Prestrafing with W+A at 100 tick, sv_accelerate 5, sv_friction 4, sv_stopspeed 75 and maxspeed 250, worked
+// out here in double as CGameMovement does it: Friction, then Accelerate towards 45 degrees left of the view.
+// The view keeps the wish direction at `share` of the best angle off the velocity, acos((W - a) / speed).
+// Returns the speed after the last move and leaves what was drawn in g_sent.
+static double Prestrafe(double share, int ticks)
+{
+	const double pi = 3.14159265358979323846, W = 250.0, a = 5.0 * 0.01 * W;
+	double vx = 250.0, vy = 0.0;
+	for (int i = 0; i < ticks; ++i) {
+		js::Move m = {};
+		m.forward = 400.0f;
+		m.side = -400.0f;
+		m.onGround = true;
+		m.velocity[0] = (float)vx;
+		m.velocity[1] = (float)vy;
+
+		double speed = sqrt(vx * vx + vy * vy);
+		const double control = speed < 75.0 ? 75.0 : speed;
+		const double after = speed - control * 4.0 * 0.01;
+		vx *= after / speed;
+		vy *= after / speed;
+		speed = after;
+		const double best = speed > W - a ? acos((W - a) / speed) : 0.0;
+		const double wish = atan2(vy, vx) + share * best;
+		m.angles[1] = (float)((wish - pi / 4) * 180.0 / pi);
+		Run(m);
+
+		const double c = vx * cos(wish) + vy * sin(wish);
+		const double add = c < W - a ? a : W - c;
+		if (add > 0.0) {
+			vx += add * cos(wish);
+			vy += add * sin(wish);
+		}
+	}
+	return sqrt(vx * vx + vy * vy);
 }
 
 static float FloatAt(const std::string& s, size_t at)
@@ -177,37 +228,50 @@ int main()
 	CHECK(g_sent.size() == 2);
 	if (g_sent.size() == 2) CHECK(HudText(g_sent[0]).find("\n53.33 100.00%") != std::string::npos);
 
-	// Prestrafe trainer: the ground speed every 5th command, kept through the air, on the first group
-	// whose own HUD is off.
-	Settings(defaults, 511 | JSCV_PRETRAINER, PRESTRAFETRAINER_ENABLED);
+	// Prestrafe trainer. Holding the best angle every tick, the speed settles at shavit's MaxPrestrafe,
+	// W * sqrt((A / F) * (2 - A dt) / (2 - F dt)), and the trainer reads 100, drawn every 13
+	// commands like the slow strafe trainer, on the first group whose own HUD is off.
+	Settings(defaults, 511 | JSCV_PRETRAINER, PRESTRAFETRAINER_ENABLED, true);
 	g_sent.clear();
-	for (int i = 0; i < 4; ++i) Step(true, 0, 0, 90, 265);
-	CHECK(g_sent.empty());
-	Step(true, 0, 0, 90, 265);
-	CHECK(g_sent.size() == 1);
-	if (g_sent.size() == 1) {
-		const Sent& hud = g_sent[0];
+	const double maxPrestrafe = 250.0 * sqrt((5.0 / 4.0) * (2.0 - 5.0 * 0.01) / (2.0 - 4.0 * 0.01));
+	double speed = Prestrafe(1.0, 390);
+	CHECK(fabs(speed - maxPrestrafe) < 0.01);
+	CHECK(g_sent.size() == 30);
+	if (!g_sent.empty()) {
+		const Sent& hud = g_sent.back();
 		CHECK(hud.id == 21 && hud.data[0] == 0);
-		CHECK(FloatAt(hud.data, 1) == -1.0f && FloatAt(hud.data, 5) == -1.0f);
-		CHECK(hud.data[9] == 0 && (unsigned char)hud.data[10] == 255 && (unsigned char)hud.data[11] == 255);
-		CHECK(FloatAt(hud.data, 1 + 8 + 8 + 1 + 8) == 0.2f);
-		CHECK(HudText(hud) == " 265");
+		CHECK(FloatAt(hud.data, 1) == -1.0f);
+		CHECK((unsigned char)hud.data[9] == 255 && (unsigned char)hud.data[10] == 255 && (unsigned char)hud.data[11] == 255);
+		CHECK(FloatAt(hud.data, 1 + 8 + 8 + 1 + 8) == 13 / 100.0f + 0.05f);
+		CHECK(HudText(hud).compare(0, 4, "100\n") == 0);
 	}
+	// Any other angle ends slower and reads as its share: 80 is turning too slowly, 120 too fast.
 	g_sent.clear();
-	for (int i = 0; i < 5; ++i) Step(false, 0, 0, 90, 300);
-	CHECK(g_sent.size() == 1 && HudText(g_sent[0]) == " 265");
-	Settings(defaults | TRAINER_ENABLED, 511 | JSCV_PRETRAINER, PRESTRAFETRAINER_ENABLED);
+	CHECK(Prestrafe(0.8, 390) < maxPrestrafe - 0.5);
+	CHECK(!g_sent.empty() && HudText(g_sent.back()).compare(0, 3, "80\n") == 0);
 	g_sent.clear();
-	for (int i = 0; i < 5; ++i) Step(true, 0, 0, 90, 271);
-	CHECK(g_sent.size() == 1);
-	if (g_sent.size() == 1) {
-		CHECK(g_sent[0].data[0] == 2 && HudText(g_sent[0]) == " 271");
-		CHECK((unsigned char)g_sent[0].data[9] == 255 && (unsigned char)g_sent[0].data[10] == 255 && (unsigned char)g_sent[0].data[11] == 255);
-	}
-	// Off in Bools2, or a plugin that doesn't send it, draws nothing.
-	Settings(defaults, 511 | JSCV_PRETRAINER);
+	CHECK(Prestrafe(1.2, 390) < maxPrestrafe - 0.5);
+	CHECK(!g_sent.empty() && HudText(g_sent.back()).compare(0, 4, "120\n") == 0);
+
+	Settings(defaults | TRAINER_ENABLED, 511 | JSCV_PRETRAINER, PRESTRAFETRAINER_ENABLED, true);
 	g_sent.clear();
-	for (int i = 0; i < 5; ++i) Step(true, 0, 0, 90, 271);
+	Prestrafe(1.0, 13);
+	CHECK(g_sent.size() == 1 && g_sent[0].data[0] == 2);
+	// Jumping, in the air, under the speed where pushing straight is best, without move keys, off in
+	// Bools2 or from a plugin that doesn't send the cvars: nothing.
+	g_sent.clear();
+	for (int i = 0; i < 13; ++i) Step(true, IN_JUMP, -400, 90.0f + i, 270);
+	for (int i = 0; i < 13; ++i) Step(false, 0, -400, 90.0f + i, 270);
+	for (int i = 0; i < 13; ++i) Step(true, 0, -400, 90.0f + i, 200);
+	for (int i = 0; i < 13; ++i) Step(true, 0, 0, 90.0f + i, 270);
+	int drawn = 0;
+	for (const Sent& s : g_sent) drawn += s.id == 21 && s.data[0] == 2;
+	CHECK(drawn == 0);
+	Settings(defaults, 511 | JSCV_PRETRAINER, 0, true);
+	g_sent.clear();
+	Prestrafe(1.0, 26);
+	Settings(defaults, 511 | JSCV_PRETRAINER, PRESTRAFETRAINER_ENABLED);
+	Prestrafe(1.0, 26);
 	CHECK(g_sent.empty());
 
 	// A new session draws nothing until settings come again.
