@@ -401,7 +401,7 @@ public Action Command_Hello(int client, int args)
 		gI_SentTotal[client] = -1;
 		gB_StateDump[client] = true;
 		gB_StateRan[client] = false;
-		MarkListDirty(client);
+		MarkListDirty(client, 1);
 		SendLandfixSkip(client);
 		ResetZonePlayer(client);
 	}

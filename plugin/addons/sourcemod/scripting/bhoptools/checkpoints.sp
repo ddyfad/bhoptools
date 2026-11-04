@@ -10,6 +10,9 @@
 
 #define APPLY_KZ (1 << 0)
 
+// ClientCommand text is reliable: a client that lags or chokes gets everything queued since at once, into an 8 KB command buffer.
+#define LIST_INTERVAL 0.04
+
 // Stands in for the checkpoint number in the save line; must match the client library.
 #define CHAT_NUMBER 1234567890
 
@@ -27,7 +30,9 @@ int gI_SentCpset[MAXPLAYERS+1];
 int gI_SentMax[MAXPLAYERS+1];
 
 bool gB_ListDirty[MAXPLAYERS+1];
-int gI_ListNext[MAXPLAYERS+1];
+int gI_ListNext[MAXPLAYERS+1]; // counts down to gI_ListFrom: the newest checkpoints, which prev reaches first, go first
+int gI_ListFrom[MAXPLAYERS+1];
+float gF_ListAt[MAXPLAYERS+1];
 
 // Shavit_SaveCheckpoint returns the current index even when it refused the
 // save, so watch for Shavit_OnSave firing inside the call instead.
@@ -125,33 +130,44 @@ void SendCheckpointCount(int client)
 		Debug(client, "checkpoint count %d, cap %d", total, max);
 	}
 
-	if (!gB_ListDirty[client])
+	// Engine time: game time follows the player's tickbase here, and several commands can run in one tick.
+	if (!gB_ListDirty[client] || GetEngineTime() < gF_ListAt[client])
 	{
 		return;
 	}
 
-	cp_cache_t cp;
-
-	for (int sent = 0; sent < 4 && gI_ListNext[client] <= total; sent++, gI_ListNext[client]++)
+	if (gI_ListNext[client] > total)
 	{
-		if (Shavit_GetCheckpoint(client, gI_ListNext[client], cp))
-		{
-			AckState(client, "l", gI_LastCmd[client], gI_ListNext[client], cp);
-		}
+		gI_ListNext[client] = total;
 	}
 
-	gB_ListDirty[client] = gI_ListNext[client] <= total;
+	cp_cache_t cp;
+
+	if (gI_ListNext[client] >= gI_ListFrom[client] && Shavit_GetCheckpoint(client, gI_ListNext[client], cp))
+	{
+		AckState(client, "l", gI_LastCmd[client], gI_ListNext[client], cp);
+		gF_ListAt[client] = GetEngineTime() + LIST_INTERVAL;
+	}
+
+	gI_ListNext[client]--;
+	gB_ListDirty[client] = gI_ListNext[client] >= gI_ListFrom[client];
 
 	if (!gB_ListDirty[client])
 	{
-		Debug(client, "checkpoint list sent (%d)", total);
+		Debug(client, "checkpoint list sent (%d to %d)", gI_ListFrom[client], total);
 	}
 }
 
-void MarkListDirty(int client)
+// Checkpoints below `from` kept their numbers, so the client's copies of them still hold.
+void MarkListDirty(int client, int from)
 {
+	if (!gB_ListDirty[client] || from < gI_ListFrom[client])
+	{
+		gI_ListFrom[client] = from;
+	}
+
 	gB_ListDirty[client] = true;
-	gI_ListNext[client] = 1;
+	gI_ListNext[client] = cellmax;
 }
 
 // gI_Checkpoint is a shavit index, so follow it when shavit renumbers. Saving at the cap
@@ -165,7 +181,7 @@ public Action Shavit_OnSave(int client, int index, bool overflow, bool duplicate
 
 	if (overflow)
 	{
-		MarkListDirty(client);
+		MarkListDirty(client, 1);
 		Debug(client, "save at the cap dropped checkpoint 1");
 	}
 
@@ -184,7 +200,7 @@ public Action Shavit_OnSave(int client, int index, bool overflow, bool duplicate
 
 public Action Shavit_OnDelete(int client, int index, bool cleared)
 {
-	MarkListDirty(client);
+	MarkListDirty(client, cleared ? 1 : index);
 	Debug(client, "checkpoint %d deleted%s, tracking %d", index, cleared ? " (all)" : "", gI_Checkpoint[client]);
 
 	if (cleared || index == gI_Checkpoint[client])
