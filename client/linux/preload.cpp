@@ -20,6 +20,7 @@
 #include "teleport_predict.h"
 #include "checkpoint_predict.h"
 #include "speedo.h"
+#include "jumpstats.h"
 #include "chat_glyphs.h"
 #include "download_progress.h"
 #include "fastdl.h"
@@ -666,6 +667,7 @@ static void Hooked_IN_SetSampleTime(void* self, float frametime)
 	g_mouseSampleTimeLeft = frametime;
 	g_frameStart = plat_now();
 	g_originalIN_SetSampleTime(self, frametime);
+	js::OnFrame();
 }
 
 static void InstallVtableHooks(void* self)

@@ -12,6 +12,7 @@ struct Settings {
 	bool fastdl    = true;
 	bool speedo    = true;
 	bool hudkeys   = true;
+	bool jsframe   = false;  // client-drawn compact trainers redrawn every frame instead of every tick
 	bool chatglyphs = true;  // Linux only
 };
 

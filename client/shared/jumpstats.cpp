@@ -8,6 +8,7 @@
 #include "engine_trace_layout.h"
 #include "hudkeys.h"
 #include "game_layout.h"
+#include "settings.h"
 #include "utils.h"
 
 #include <cmath>
@@ -506,8 +507,17 @@ void CompactColour(float value, int rgb[3])
 	}
 }
 
+// What a per-frame HUD last showed, so an unchanged one isn't sent again every frame.
+struct Shown {
+	std::string text;
+	int rgb[3];
+	double at;
+};
+// An unchanged per-frame HUD is still sent this often, to stay up for its hold time.
+const double kFrameRefresh = 0.1;
+
 // trainer.sp's compact look, from 2x74/strafetrainer: a label over a one line gauge, 1-200%, 100% in the middle.
-void DrawCompact(int hud, float x, float value, float hold, int group, const std::string& label)
+void DrawCompact(int hud, float x, float value, float hold, int group, const std::string& label, Shown* shown = nullptr)
 {
 	value = value < 1.0f ? 1.0f : value > 200.0f ? 200.0f : value;
 	const int marker = RoundFloat((value - 1.0f) / 199.0f * 20.0f);
@@ -515,17 +525,59 @@ void DrawCompact(int hud, float x, float value, float hold, int group, const std
 	for (int i = 0; i < 21; ++i) bar += i == marker ? 'o' : i == 10 ? '|' : '-';
 	int rgb[3];
 	CompactColour(value, rgb);
-	ShowHud(hud, x, rgb, hold, group, Has2(TRAINER_PCT_BELOW) ? "[" + bar + "]\n" + label : label + "\n[" + bar + "]");
+	const std::string text = Has2(TRAINER_PCT_BELOW) ? "[" + bar + "]\n" + label : label + "\n[" + bar + "]";
+	if (shown) {
+		const double now = MonotonicSeconds();
+		if (text == shown->text && !memcmp(rgb, shown->rgb, sizeof(rgb)) && now - shown->at < kFrameRefresh) return;
+		shown->text = text;
+		memcpy(shown->rgb, rgb, sizeof(rgb));
+		shown->at = now;
+	}
+	ShowHud(hud, x, rgb, hold, group, text);
 }
 
-// The compact trainers are drawn every command from values smoothed over time, as 2x74/strafetrainer does, where
-// the plugin can only send a trainer window's average. This is how far one command moves them, by trainer speed.
-float CompactStep(int which)
+// The compact trainers are drawn from values smoothed over time, as 2x74/strafetrainer does, where the plugin can
+// only send a trainer window's average. This is how far `dt` seconds move them, by trainer speed.
+float CompactStep(int which, float dt)
 {
 	static const float tau[3] = { 0.15f, 0.1f, 0.06f };
-	return 1.0f - expf(-TickInterval() / tau[which]);
+	return 1.0f - expf(-dt / tau[which]);
 }
-const float kCompactHold = 0.1f;
+const float kCompactHold = 0.1f, kFrameHold = 0.2f;
+
+// Per frame, each compact trainer keeps its samples from the last two ticks and is drawn in between them,
+// smoothed on the frame time. Values are jss for the strafe trainer, value, pace and top for the prestrafe one.
+struct FrameTrack {
+	bool   live;
+	double at;  // when the last sample came
+	float  prev[3], last[3];
+	float  shown[3];  // the first two smoothed, the third as it is
+	int    which, group;
+	Shown  drawn;
+};
+FrameTrack g_frameStrafe, g_framePre;
+double g_lastFrame = -1.0;
+
+// Frames come from the IN_SetSampleTime hook; without them it stays per tick.
+bool PerFrame()
+{
+	return settings::Get().jsframe && g_lastFrame >= 0.0 && MonotonicSeconds() - g_lastFrame < 0.5;
+}
+
+void FrameSample(FrameTrack& t, const float v[3], int which, int group)
+{
+	if (!t.live) {
+		memcpy(t.last, v, sizeof(t.last));
+		memcpy(t.shown, v, sizeof(t.shown));
+		t.drawn.at = -1.0;
+		t.live = true;
+	}
+	memcpy(t.prev, t.last, sizeof(t.prev));
+	memcpy(t.last, v, sizeof(t.last));
+	t.at = MonotonicSeconds();
+	t.which = which;
+	t.group = group;
+}
 
 int TrainerSpeedIdx()
 {
@@ -548,6 +600,7 @@ void Trainer(bool inbhop, float jss)
 		g_trainerNumber = 0.0f;
 		g_trainerBar[0] = g_trainerBar[1] = g_trainerBar[2] = 0.0f;
 		g_compactJss = -1.0f;
+		g_frameStrafe.live = false;
 		return;
 	}
 	g_trainerNumber += jss;
@@ -555,10 +608,16 @@ void Trainer(bool inbhop, float jss)
 
 	const int which = TrainerSpeedIdx();
 	const bool compact = Has(TRAINER_ENABLED) && Has2(TRAINER_COMPACT);
-	if (compact) {
+	if (compact && PerFrame()) {
+		const float v[3] = { jss * 100.0f, 0.0f, 0.0f };
+		FrameSample(g_frameStrafe, v, which, 0);
+	} else if (compact) {
 		const float sample = jss * 100.0f;
-		g_compactJss = g_compactJss < 0.0f ? sample : g_compactJss + (sample - g_compactJss) * CompactStep(which);
+		g_compactJss = g_compactJss < 0.0f ? sample : g_compactJss + (sample - g_compactJss) * CompactStep(which, TickInterval());
 		DrawCompact(HudTrainer, -1.0f, g_compactJss, kCompactHold, 0, Fmt("%.1f%%", g_compactJss));
+		g_frameStrafe.live = false;
+	} else {
+		g_frameStrafe.live = false;
 	}
 
 	const int rate = TickRate();
@@ -644,6 +703,14 @@ void PreTrainerReset()
 	g_preValueSum = g_prePaceSum = 0.0f;
 	g_preSamples = 0;
 	g_compactPreValue = -1.0f;
+	g_framePre.live = false;
+}
+
+// the compact gauge's percent: each colour step is PRETRAINER_WHITE off the top, left turning too slowly
+float PrePercent(float value, float pace, float top)
+{
+	const float off = (top - pace) / PRETRAINER_WHITE;
+	return value > 1.0f ? 100.0f + off * 5.0f : 100.0f - off * 10.0f;
 }
 
 // From PRETRAINER_FROM of the best top speed: the top speed each tick is on pace for, averaged over the trainer
@@ -667,18 +734,22 @@ void PreTrainer(bool inbhop)
 	const int which = TrainerSpeedIdx();
 	// the first group whose own HUD is off, else 5
 	const int group = !Has(TRAINER_ENABLED) ? 0 : !Has(JHUD_ENABLED) ? 1 : !Has(OFFSETS_ENABLED) ? 2 : !Has(SHOWKEYS_ENABLED) ? 3 : !Has(SPEEDOMETER_ENABLED) ? 4 : 5;
+	if (Has2(PRETRAINER_COMPACT) && PerFrame()) {
+		const float v[3] = { value, pace, top };
+		FrameSample(g_framePre, v, which, group);
+		return;
+	}
+	g_framePre.live = false;
 	if (Has2(PRETRAINER_COMPACT)) {
 		if (g_compactPreValue < 0.0f) {
 			g_compactPreValue = value;
 			g_compactPrePace = pace;
 		} else {
-			const float k = CompactStep(which);
+			const float k = CompactStep(which, TickInterval());
 			g_compactPreValue += (value - g_compactPreValue) * k;
 			g_compactPrePace += (pace - g_compactPrePace) * k;
 		}
-		const float off = (top - g_compactPrePace) / PRETRAINER_WHITE;
-		const float percent = g_compactPreValue > 1.0f ? 100.0f + off * 5.0f : 100.0f - off * 10.0f;
-		DrawCompact(HudPreStrafeTrainer, HudCoord(HudPreStrafeTrainer, 0), percent, kCompactHold, group, Fmt("%i", RoundFloat(g_compactPrePace)));
+		DrawCompact(HudPreStrafeTrainer, HudCoord(HudPreStrafeTrainer, 0), PrePercent(g_compactPreValue, g_compactPrePace, top), kCompactHold, group, Fmt("%i", RoundFloat(g_compactPrePace)));
 		return;
 	}
 
@@ -1003,6 +1074,7 @@ void Reset(int session)
 	g_variable.clear();
 	g_hasComparison = false;
 	g_haveTime = false;
+	g_frameStrafe.live = g_framePre.live = false;
 	g_hudMsg = g_textMsg = -1;
 }
 
@@ -1140,6 +1212,38 @@ void PostMove(const float origin[3], const float velocity[3])
 void OnTeleport()
 {
 	g_bgs.cmdNum = 0;
+}
+
+void OnFrame()
+{
+	const double now = MonotonicSeconds();
+	const float dt = g_lastFrame < 0.0 ? 0.0f : (float)(now - g_lastFrame);
+	g_lastFrame = now;
+	if (!g_on || !settings::Get().jsframe) return;
+
+	FrameTrack* tracks[2] = { &g_frameStrafe, &g_framePre };
+	for (FrameTrack* t : tracks) {
+		// no sample for a while: the trainer was switched off or the game stopped running commands
+		if (t->live && now - t->at > 0.1) t->live = false;
+		if (!t->live) continue;
+		float a = (float)((now - t->at) / TickInterval());
+		a = a < 0.0f ? 0.0f : a > 1.0f ? 1.0f : a;
+		const float k = CompactStep(t->which, dt);
+		for (int i = 0; i < 3; ++i) {
+			const float x = t->prev[i] + (t->last[i] - t->prev[i]) * a;
+			t->shown[i] = i < 2 ? t->shown[i] + (x - t->shown[i]) * k : x;
+		}
+	}
+
+	if (g_frameStrafe.live) {
+		const float jss = g_frameStrafe.shown[0];
+		DrawCompact(HudTrainer, -1.0f, jss, kFrameHold, 0, Fmt("%.1f%%", jss), &g_frameStrafe.drawn);
+	}
+	if (g_framePre.live) {
+		const FrameTrack& t = g_framePre;
+		DrawCompact(HudPreStrafeTrainer, HudCoord(HudPreStrafeTrainer, 0), PrePercent(t.shown[0], t.shown[1], t.shown[2]), kFrameHold, t.group,
+			Fmt("%i", RoundFloat(t.shown[1])), &g_framePre.drawn);
+	}
 }
 
 }

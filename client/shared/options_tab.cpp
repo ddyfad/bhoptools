@@ -51,6 +51,7 @@ const Row kRows[] = {
 	{ &Settings::rawinput,  nullptr,            L"rawinput2" },
 	{ &Settings::predict,   nullptr,            L"prediction" },
 	{ &Settings::speedo,    &Settings::hudkeys, L"clientside hud fixes" },
+	{ &Settings::jsframe,   nullptr,            L"jumpstats trainers every frame (off: every tick)" },
 };
 const int kRowCount = sizeof(kRows) / sizeof(kRows[0]);
 const int kLeft = 20, kTop = 20, kRowTall = 28, kBox = 14, kWidth = 560;

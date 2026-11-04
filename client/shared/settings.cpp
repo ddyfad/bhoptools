@@ -33,6 +33,7 @@ const Field kFields[] = {
 	{ "fastdl",    &Settings::fastdl },
 	{ "speedo",    &Settings::speedo },
 	{ "hudkeys",   &Settings::hudkeys },
+	{ "jsframe",   &Settings::jsframe },
 	{ "chatglyphs", &Settings::chatglyphs },
 };
 
