@@ -45,5 +45,10 @@ void PostMove(const float origin[3], const float velocity[3]);
 void OnTeleport();
 // Once a rendered frame (IN_SetSampleTime), for the HUDs drawn per frame.
 void OnFrame();
+// The reversal close-up's bars, painted on the engine's top panel. False until the interfaces are up.
+bool InstallPaint();
+#ifdef _WIN32
+void UninstallPaint();
+#endif
 
 }

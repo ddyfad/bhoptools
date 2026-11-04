@@ -9,15 +9,19 @@
 #include "hudkeys.h"
 #include "game_layout.h"
 #include "settings.h"
+#include "sigs.h"
 #include "utils.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <string>
+#include <vector>
 
 namespace js {
 namespace {
@@ -25,7 +29,7 @@ namespace {
 // bgs-jumpstats' settings indexes and bits (jumpstat/settings.sp)
 enum { GainReallyBad, GainBad, GainMeh, GainGood, GainReallyGood, Bools, Usage, Positions_X, Positions_Y,
 	Positions2_X, Positions2_Y, TrainerSpeed, JhudCutOff, JhudSpeedColorsJump, JhudHidden, Bools2, kSettings };
-enum { HudJhud, HudTrainer, HudOffset, HudSpeedometer, HudFjt, HudShowKeys, HudPreStrafeTrainer };
+enum { HudJhud, HudTrainer, HudOffset, HudSpeedometer, HudFjt, HudShowKeys, HudPreStrafeTrainer, HudReversal };
 enum { Trainer_Slow, Trainer_Medium, Trainer_Fast };
 
 const uint32_t JHUD_ENABLED = 1u << 0, JHUD_JSS = 1u << 1, JHUD_SYNC = 1u << 2, JHUD_GMOD_JSS = 1u << 3,
@@ -38,9 +42,10 @@ const uint32_t JHUD_ENABLED = 1u << 0, JHUD_JSS = 1u << 1, JHUD_SYNC = 1u << 2, 
 	SHOWYAWS_ENABLED = 1u << 29, SPEEDOMETER_SMALL_VELOCITY = 1u << 30, SPEEDOMETER_COMPARISON = 1u << 31;
 const int JHUD_HIDE_JUMP = 1 << 0, JHUD_HIDE_SPEED = 1 << 1, JHUD_HIDE_GAIN = 1 << 2;
 // Bools2. MMOD_GAIN shows the mmod gain, BOTH_GAIN "old / mmod", neither the old gain. Bits 5-8 are the compact
-// trainers' colour.
+// trainers' colour, bits 11-12 the reversal close-up's ticks either side (an index into kReversalTicks).
 const int PRESTRAFETRAINER_ENABLED = 1 << 0, MMOD_GAIN = 1 << 1, BOTH_GAIN = 1 << 2, TRAINER_COMPACT = 1 << 3,
-	TRAINER_PCT_BELOW = 1 << 4, TRAINER_COLOUR_SHIFT = 5, PRETRAINER_COMPACT = 1 << 9;
+	TRAINER_PCT_BELOW = 1 << 4, TRAINER_COLOUR_SHIFT = 5, PRETRAINER_COMPACT = 1 << 9, REVERSAL_ENABLED = 1 << 10,
+	REVERSAL_TICKS_SHIFT = 11;
 const int TrainerColour_Rainbow = 9;
 
 // bhoptools_jsset cvar bits, which js-enabled-* and js-allow-trainer-* are on. The last two aren't cvars:
@@ -48,7 +53,7 @@ const int TrainerColour_Rainbow = 9;
 // with both gains and Bools2 picking what's shown, sent to clients that say they draw it.
 const int JSCV_JHUD = 1 << 0, JSCV_TRAINER = 1 << 1, JSCV_TRAINER_MEDIUM = 1 << 2, JSCV_TRAINER_FAST = 1 << 3,
 	JSCV_OFFSET = 1 << 4, JSCV_SPEEDOMETER = 1 << 5, JSCV_SSJ = 1 << 6, JSCV_SHOWKEYS = 1 << 7, JSCV_SHOWYAWS = 1 << 8,
-	JSCV_PRETRAINER = 1 << 9, JSCV_REALGAIN = 1 << 10, JSCV_GAINMODES = 1 << 11;
+	JSCV_PRETRAINER = 1 << 9, JSCV_REALGAIN = 1 << 10, JSCV_GAINMODES = 1 << 11, JSCV_REVERSAL = 1 << 12;
 
 const int kColors[9][3] = {
 	{ 255, 0, 0 }, { 255, 165, 0 }, { 0, 255, 0 }, { 0, 255, 255 }, { 255, 255, 255 },
@@ -339,7 +344,9 @@ void Jhud(int jump, int speed, float gain, float mmod, float sync, float jss, fl
 			const char* arrow = absJss == 100 ? "\xE2\x9C\x93" : RoundToFloor(jss * 100.0f) > 100 ? "\xE2\x86\x93" : "\xE2\x86\x91";
 			message += Fmt(bracket ? " (%i%% %s)" : "%i%% %s", RoundToFloor(absJss), arrow);
 		}
-		if (!(hidden & JHUD_HIDE_GAIN)) stats = (bits & BOTH_GAIN) ? Fmt("%.2f / %.2f", gain, mmod) : Fmt("%.2f", (bits & MMOD_GAIN) ? mmod : gain);
+		// with gain modes the mmod gain has three decimals; "both" only comes with them
+		if (!(hidden & JHUD_HIDE_GAIN))
+			stats = (bits & BOTH_GAIN) ? Fmt("%.2f / %.3f", gain, mmod) : !(bits & MMOD_GAIN) ? Fmt("%.2f", gain) : Cvar(JSCV_GAINMODES) ? Fmt("%.3f", mmod) : Fmt("%.2f", mmod);
 		if (Has(JHUD_SYNC)) stats += Fmt(" %.2f%%", sync);
 		Trim(stats);
 		if (!stats.empty()) message += (message.empty() ? "" : "\n") + stats;
@@ -406,17 +413,17 @@ void SsjWrite(int jump, int speed, int strafes, float maxHeight, float heightDel
 	const bool decimals = Has(SSJ_DECIMALS);
 	std::string m = Fmt("J: %s%i %s| S: %s%i", v, jump, t, v, speed);
 	if (Has(SSJ_GAIN)) {
-		// each gain in its own colour
-		auto append = [&](float g, int idx) {
+		// each gain in its own colour; with gain modes the mmod gain has three decimals
+		auto append = [&](float g, int idx, bool three) {
 			const int c = g_set[idx];
 			const char* hex = kColorsHex[c >= 0 && c < 9 ? c : 0];
-			m += decimals ? Fmt("%s%.2f%%", hex, g) : Fmt("%s%i%%", hex, RoundToFloor(g));
+			m += !decimals ? Fmt("%s%i%%", hex, RoundToFloor(g)) : three ? Fmt("%s%.3f%%", hex, g) : Fmt("%s%.2f%%", hex, g);
 		};
 		const int bits = GainBits();
 		m += Fmt(" %s| G: ", t);
-		if (!(bits & MMOD_GAIN)) append(gain, PercentageColorIdx(gain, true));
+		if (!(bits & MMOD_GAIN)) append(gain, PercentageColorIdx(gain, true), false);
 		if (bits & BOTH_GAIN) m += Fmt(" %s/ ", t);
-		if (bits & (MMOD_GAIN | BOTH_GAIN)) append(mmod, GainColorIdx(mmod));
+		if (bits & (MMOD_GAIN | BOTH_GAIN)) append(mmod, GainColorIdx(mmod), Cvar(JSCV_GAINMODES));
 	}
 	if (Has(SSJ_SYNC)) m += decimals ? Fmt(" %s| S: %s%.2f%%", t, v, sync) : Fmt(" %s| S: %s%i%%", t, v, RoundToFloor(sync));
 	if (Has(SSJ_STRAFES)) m += Fmt(" %s| Stf: %s%i", t, v, strafes);
@@ -770,6 +777,208 @@ void PreTrainer(bool inbhop)
 	ShowHud(HudPreStrafeTrainer, Color(idx), hold, group, TrainerString(avgPace / 100.0f, fast ? 1.0f + off * 0.1f : 1.0f - off * 0.1f));
 }
 
+// reversal.sp, the reversal close-up after the ok.tools loss trainer: each air tick's turn as a share of the best
+// (bhop-get-stats' jss), around the last time the turn changed direction. A tick turning under kReversalSlow deg/s
+// has no direction, so a reversal can cross a few of them, and those are kept in front of the flip. A capture is
+// shown once its ticks after the flip are in (or the next flip or the ground cuts it short) and stays up until the
+// next one. Drawn as bars when the engine's top panel can be painted on, else as the plugin's text.
+const int kReversalTicks[4] = { 10, 15, 20, 6 };
+const float kReversalSlow = 5.0f;
+const size_t kReversalKeep = 256;
+// the plugin's text: a HudMsg holds about 220 bytes and a column is three 3-byte glyphs
+const int kReversalTextSide = 11, kReversalTextTicks = 22;
+const double kReversalResend = 1.0;
+
+struct RevTick { float share; int dir; bool slow; };
+struct Reversal {
+	int dir, slow, gap, following;
+	bool recording, drawn;
+	std::deque<RevTick> active, before, after;
+	std::vector<RevTick> shownBefore, shownAfter;
+	std::string text;
+	double sent;
+} g_rev;
+double g_revPainted = -1.0;  // the last paint of the engine's top panel, which draws the bars
+
+int ReversalTicks() { return kReversalTicks[(g_set[Bools2] >> REVERSAL_TICKS_SHIFT) & 3]; }
+bool ReversalOn() { return g_on && Cvar(JSCV_REVERSAL) && Has2(REVERSAL_ENABLED); }
+bool ReversalBars() { return g_revPainted >= 0.0 && MonotonicSeconds() - g_revPainted < 0.5; }
+
+// The first group whose own HUD is off and the prestrafe trainer didn't take, else 5.
+int ReversalGroup()
+{
+	const uint32_t huds[5] = { TRAINER_ENABLED, JHUD_ENABLED, OFFSETS_ENABLED, SHOWKEYS_ENABLED, SPEEDOMETER_ENABLED };
+	bool pretrainer = Cvar(JSCV_PRETRAINER) && Has2(PRESTRAFETRAINER_ENABLED);
+	for (int i = 0; i < 5; ++i) {
+		if (Has(huds[i])) continue;
+		if (pretrainer) {
+			pretrainer = false;
+			continue;
+		}
+		return i;
+	}
+	return 5;
+}
+
+void ReversalBreak()
+{
+	g_rev.dir = g_rev.slow = 0;
+	g_rev.active.clear();
+	g_rev.recording = false;
+}
+
+// Bars two rows tall under a line at the best turn, the flip a column between; overturns stop at full.
+void ReversalText()
+{
+	const int after = (std::min)((int)g_rev.shownAfter.size(), kReversalTextSide);
+	const int before = (std::min)((int)g_rev.shownBefore.size(), kReversalTextTicks - after);
+	// U+2581..U+2588, an eighth to a full block; U+2591 light shade for an empty cell, so every cell is a block wide
+	static const char* const blocks[9] = { "\xE2\x96\x91", "\xE2\x96\x81", "\xE2\x96\x82", "\xE2\x96\x83", "\xE2\x96\x84",
+		"\xE2\x96\x85", "\xE2\x96\x86", "\xE2\x96\x87", "\xE2\x96\x88" };
+	std::string rows[3];
+	auto column = [&](float share) {
+		const int level = RoundFloat((share > 1.0f ? 1.0f : share) * 16.0f);
+		rows[0] += "\xE2\x94\x80";
+		rows[1] += blocks[level > 8 ? level - 8 : 0];
+		rows[2] += blocks[level > 8 ? 8 : level];
+	};
+	for (size_t i = g_rev.shownBefore.size() - before; i < g_rev.shownBefore.size(); ++i) column(g_rev.shownBefore[i].share);
+	for (std::string& r : rows) r += "\xE2\x94\x82";
+	for (int i = 0; i < after; ++i) column(g_rev.shownAfter[i].share);
+	g_rev.text = rows[0] + "\n" + rows[1] + "\n" + rows[2];
+}
+
+void ReversalShow()
+{
+	g_rev.shownBefore.assign(g_rev.before.begin(), g_rev.before.end());
+	g_rev.shownAfter.assign(g_rev.after.begin(), g_rev.after.end());
+	g_rev.drawn = true;
+	ReversalText();
+	g_rev.sent = -1.0;
+}
+
+// A capture the next flip or the ground cut short is still shown, with the ticks after it that came.
+void ReversalCutShort()
+{
+	if (g_rev.recording && !g_rev.drawn && !g_rev.after.empty()) ReversalShow();
+}
+
+// Without the bars, the text is sent again each kReversalResend to stay up.
+void ReversalKeepUp()
+{
+	if (g_rev.text.empty() || !ReversalOn() || ReversalBars()) return;
+	const double now = MonotonicSeconds();
+	if (g_rev.sent >= 0.0 && now - g_rev.sent < kReversalResend) return;
+	g_rev.sent = now;
+	static const int white[3] = { 255, 255, 255 };
+	ShowHud(HudReversal, white, (float)kReversalResend + 0.25f, ReversalGroup(), g_rev.text);
+}
+
+void ReversalTick(bool inbhop, float yawDiff, float speed)
+{
+	if (!Cvar(JSCV_REVERSAL)) return;
+	// a turn this big in one tick is a teleport setting the angles
+	if (!inbhop || fabsf(yawDiff) > 90.0f) {
+		ReversalCutShort();
+		ReversalBreak();
+		ReversalKeepUp();
+		return;
+	}
+	const bool slow = fabsf(yawDiff) <= kReversalSlow * TickInterval();
+	const int next = slow ? 0 : yawDiff > 0.0f ? 1 : -1;
+	bool reversed = false;
+	if (!next) {
+		if (g_rev.dir) ++g_rev.slow;
+	} else {
+		reversed = g_rev.dir && next != g_rev.dir;
+		if (reversed) g_rev.gap = g_rev.slow;
+		g_rev.dir = next;
+		g_rev.slow = 0;
+	}
+	if (!g_rev.dir) {
+		ReversalKeepUp();
+		return;
+	}
+
+	if (reversed) {
+		ReversalCutShort();
+		const size_t keep = (std::min)((size_t)(ReversalTicks() + g_rev.gap), g_rev.active.size());
+		g_rev.before.assign(g_rev.active.end() - keep, g_rev.active.end());
+		g_rev.active.clear();
+		g_rev.after.clear();
+		g_rev.following = ReversalTicks();
+		g_rev.recording = true;
+		g_rev.drawn = false;
+	}
+
+	const RevTick tick = { yawDiff != 0.0f ? fabsf(yawDiff / RadToDeg(atanf(30 / speed))) : 0.0f, next, slow };
+	g_rev.active.push_back(tick);
+	if (g_rev.active.size() > kReversalKeep) g_rev.active.pop_front();
+	if (g_rev.recording && (int)g_rev.after.size() < g_rev.following) {
+		g_rev.after.push_back(tick);
+		if ((int)g_rev.after.size() == g_rev.following) ReversalShow();
+	}
+	ReversalKeepUp();
+}
+
+// ok.tools' close-up: before the flip on the left half, after on the right, left turns green, right blue, slow
+// ticks amber over a faint amber band, the best turn a red line with room above it for overturns.
+typedef void (*Int4Fn)(void*, int, int, int, int);
+typedef void (*ScreenSizeFn)(void*, int&, int&);
+const int kVT_IVEngineClient_GetScreenSize = 5;
+void* g_revSurface;
+void* g_revEngine;
+
+void RevRect(int x0, int y0, int x1, int y1, int r, int g, int b, int a)
+{
+	VFunc<Int4Fn>(g_revSurface, VT_Surface_DrawSetColor)(g_revSurface, r, g, b, a);
+	VFunc<Int4Fn>(g_revSurface, VT_Surface_DrawFilledRect)(g_revSurface, x0, y0, x1, y1);
+}
+
+void ReversalPaint()
+{
+	g_revPainted = MonotonicSeconds();
+	if (!ReversalOn() || (g_rev.shownBefore.empty() && g_rev.shownAfter.empty())) return;
+	int sw = 0, sh = 0;
+	VFunc<ScreenSizeFn>(g_revEngine, kVT_IVEngineClient_GetScreenSize)(g_revEngine, sw, sh);
+	const int w = sw * 2 / 5, h = sh / 10;
+	if (w < 20 || h < 8) return;
+	const float hx = HudCoord(HudReversal, 0), hy = HudCoord(HudReversal, 1);
+	const int x = hx < 0.0f ? (sw - w) / 2 : (std::min)((int)(hx * sw), sw - w);
+	const int y = hy < 0.0f ? (sh - h) / 2 : (std::min)((int)(hy * sh), sh - h);
+	const int amplitude = h * 3 / 4, baseline = y + h;
+
+	RevRect(x, y, x + w, y + h, 15, 18, 24, 175);
+	auto bars = [&](const std::vector<RevTick>& ticks, int left, int width) {
+		const int n = (std::max)(1, (int)ticks.size());
+		for (int i = 0; i < (int)ticks.size(); ++i) {
+			const RevTick& t = ticks[i];
+			const int x0 = left + i * width / n, x1 = left + (i + 1) * width / n - (width / n >= 4 ? 1 : 0);
+			if (x1 <= x0) continue;
+			if (t.slow) RevRect(x0, y, x1, baseline, 255, 180, 65, 65);
+			const int top = baseline - (int)((std::min)(t.share, 4.0f / 3.0f) * amplitude);
+			if (t.slow) RevRect(x0, top, x1, baseline, 255, 180, 65, 255);
+			else if (t.dir > 0) RevRect(x0, top, x1, baseline, 0, 210, 135, 255);
+			else RevRect(x0, top, x1, baseline, 0, 155, 255, 255);
+		}
+	};
+	bars(g_rev.shownBefore, x, w / 2);
+	bars(g_rev.shownAfter, x + w / 2, w - w / 2);
+	const int line = (std::max)(1, h / 40);
+	RevRect(x, baseline - amplitude - line / 2, x + w, baseline - amplitude - line / 2 + line, 235, 90, 90, 200);
+	RevRect(x + w / 2 - line / 2, y, x + w / 2 - line / 2 + line, y + h, 225, 225, 225, 255);
+}
+
+typedef void (*PanelFn)(void*);
+PanelFn oPostChildPaint;
+void** g_revSlot;
+
+void Hooked_PostChildPaint(void* self)
+{
+	oPostChildPaint(self);
+	ReversalPaint();
+}
+
 // speedometer.sp and yawdiff.sp, on every 5th and 10th command where the plugins count game frames
 void Speedometer(const float velocity[3])
 {
@@ -1001,6 +1210,7 @@ void ProcessPostRunCmd(const float origin[3])
 
 	Trainer(b.ticksOnGround == 0, jssThisTick);
 	PreTrainer(b.ticksOnGround == 0);
+	ReversalTick(b.ticksOnGround == 0, yawDiff, Speed2D(velocity));
 	b.touchesWall = false;
 
 	if (b.jumpedThisTick) {
@@ -1023,7 +1233,7 @@ void ProcessPostRunCmd(const float origin[3])
 			float efficiency = 0.0f;
 			if (distance > 0.0f) efficiency = coeffsum * distance / b.trajectory;
 			coeffsum = RoundToFloor(coeffsum * 100.0f + 0.5f) / 100.0f;
-			mmod = RoundToFloor(mmod * 100.0f + 0.5f) / 100.0f;
+			mmod = Cvar(JSCV_GAINMODES) ? RoundToFloor(mmod * 1000.0f + 0.5f) / 1000.0f : RoundToFloor(mmod * 100.0f + 0.5f) / 100.0f;
 			efficiency = RoundToFloor(efficiency * 100.0f + 0.5f) / 100.0f;
 			JumpForward(b.jump, RoundToFloor(Speed2D(velocity)), b.strafeCount, b.jumpPeak - b.oldHeight, origin[2] - b.oldHeight,
 				coeffsum, mmod, 100.0f * b.syncedTick / strafeTick, efficiency, b.avgDiffFromPerf / strafeTick, b.avgAbsoluteJss / strafeTick);
@@ -1075,6 +1285,7 @@ void Reset(int session)
 	g_hasComparison = false;
 	g_haveTime = false;
 	g_frameStrafe.live = g_framePre.live = false;
+	g_rev = Reversal();
 	g_hudMsg = g_textMsg = -1;
 }
 
@@ -1212,7 +1423,42 @@ void PostMove(const float origin[3], const float velocity[3])
 void OnTeleport()
 {
 	g_bgs.cmdNum = 0;
+	ReversalBreak();
 }
+
+bool InstallPaint()
+{
+	if (g_revSlot) return true;
+	g_revSurface = CreateInterfaceIn(SURFACE_MODULE, "VGUI_Surface030");
+	g_revEngine = CreateInterfaceIn(ENGINE_MODULE, "VEngineClient014");
+	if (!g_revSurface || !g_revEngine) return false;
+	void** focus = FindVTable(ENGINE_MODULE, RTTI_FocusOverlayPanel);
+	void** panel = focus ? FindVTable(ENGINE_MODULE, RTTI_VguiPanel) : nullptr;
+	// It overrides PostChildPaint and leaves Paint, PaintBackground and PaintBorder to vgui::Panel. Anything else
+	// means the slots aren't where they should be, so the close-up stays text.
+	bool ok = panel != nullptr;
+	for (int i = VT_Panel_Paint; ok && i < VT_Panel_PostChildPaint; ++i) ok = focus[i] == panel[i];
+	ok = ok && focus[VT_Panel_PostChildPaint] != panel[VT_Panel_PostChildPaint] && InModuleCode(ENGINE_MODULE, focus[VT_Panel_PostChildPaint]);
+	if (!ok) {
+		CoreLog("jumpstats: the engine's top panel isn't as expected, the reversal close-up is drawn as text");
+		return true;
+	}
+	oPostChildPaint = reinterpret_cast<PanelFn>(focus[VT_Panel_PostChildPaint]);
+	if (!PatchPointer(&focus[VT_Panel_PostChildPaint], reinterpret_cast<void*>(&Hooked_PostChildPaint))) {
+		CoreLog("jumpstats: couldn't hook the engine's top panel, the reversal close-up is drawn as text");
+		return true;
+	}
+	g_revSlot = &focus[VT_Panel_PostChildPaint];
+	return true;
+}
+
+#ifdef _WIN32
+void UninstallPaint()
+{
+	if (g_revSlot) PatchPointer(g_revSlot, reinterpret_cast<void*>(oPostChildPaint));
+	g_revSlot = nullptr;
+}
+#endif
 
 void OnFrame()
 {
