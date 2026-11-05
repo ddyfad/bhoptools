@@ -36,15 +36,19 @@ on:
         required: false
         default: false
 
+env:
+  SM_URL: https://sm.alliedmods.net/smdrop/1.12/sourcemod-1.12.0-git7253-linux.tar.gz
+  SM_SHA256: 6bbcab989cda0ada83600d0dcb0f46affd16529b2b02ed2dba1b5baeaf02fdb4
+
 jobs:
   build:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
 
-      - uses: microsoft/setup-msbuild@v2
+      - uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2.0.0
 
       - name: Set version
         if: github.event_name == 'workflow_dispatch' && inputs.release_tag != '' && inputs.target != 'plugin'
@@ -54,7 +58,7 @@ jobs:
       - name: Build Release x64
         run: msbuild client/bhoptools.sln /p:Configuration=Release /p:Platform=x64 /m /v:minimal
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bhoptools-x64
           path: |
@@ -67,7 +71,7 @@ jobs:
   build-linux:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set version
         if: github.event_name == 'workflow_dispatch' && inputs.release_tag != '' && inputs.target != 'plugin'
@@ -79,7 +83,7 @@ jobs:
       - name: Check glibc
         run: make -C client/linux check-glibc
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bhoptools-linux-x64
           path: |
@@ -92,7 +96,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Work out the plugin version
         id: version
@@ -109,7 +113,10 @@ jobs:
       - name: Compile
         run: |
           set -e
-          curl -fsSL https://sm.alliedmods.net/smdrop/1.12/sourcemod-1.12.0-git7253-linux.tar.gz | tar xz
+          curl -fsSL "$SM_URL" -o sm.tar.gz
+          echo "$SM_SHA256  sm.tar.gz" | sha256sum -c -
+          tar xzf sm.tar.gz
+          rm sm.tar.gz
           SM=$PWD/addons/sourcemod/scripting
           mkdir out
           (cd plugin/addons/sourcemod/scripting && $SM/spcomp64 bhoptools.sp -i$SM/include -iinclude -o$GITHUB_WORKSPACE/out/bhoptools.smx)
@@ -120,7 +127,7 @@ jobs:
             cat out/manifest.json
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bhoptools-plugin
           path: out/*
@@ -134,12 +141,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: bhoptools-x64
           path: dist/windows
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: bhoptools-linux-x64
           path: dist/linux
@@ -155,7 +162,7 @@ jobs:
           tar czf bhoptools-linux.tar.gz bhoptools-linux
           cp bhoptools-linux/* .
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ inputs.release_tag }}
           target_commitish: ${{ github.sha }}
@@ -196,7 +203,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: bhoptools-plugin
           path: dist/plugin
@@ -206,7 +213,7 @@ jobs:
           set -e
           cp dist/plugin/bhoptools.smx dist/plugin/manifest.json "dist/plugin/bhoptools-${{ needs.build-plugin.outputs.version }}.smx" .
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: plugin
           target_commitish: ${{ github.sha }}
