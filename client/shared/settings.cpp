@@ -62,6 +62,33 @@ std::string Dir()
 
 namespace {
 
+// The launcher reads no_update_check before the game starts, so this setting lives in that file, not settings.cfg.
+std::string UpdatesFile()
+{
+	const std::string dir = Dir();
+	return dir.empty() ? dir : dir + "/no_update_check";
+}
+
+void LoadUpdates()
+{
+	const std::string file = UpdatesFile();
+	FILE* f = file.empty() ? nullptr : fopen(file.c_str(), "r");
+	g_settings.updates = f == nullptr;
+	if (f) fclose(f);
+}
+
+void SaveUpdates()
+{
+	const std::string file = UpdatesFile();
+	if (file.empty()) return;
+	if (g_settings.updates) {
+		remove(file.c_str());
+		return;
+	}
+	FILE* f = fopen(file.c_str(), "w");
+	if (f) fclose(f);
+}
+
 std::string Path()
 {
 	const std::string dir = Dir();
@@ -102,6 +129,7 @@ void Load()
 {
 	const std::string path = Path();
 	FILE* f = path.empty() ? nullptr : fopen(path.c_str(), "r");
+	LoadUpdates();
 	if (!f) return;
 	char line[128];
 	while (fgets(line, sizeof(line), f)) {
@@ -125,6 +153,7 @@ void Changed()
 	if (g_apply) g_apply();
 	ApplyRawInput(false);
 	Save();
+	SaveUpdates();
 }
 
 void ApplyRawInput(bool levelLoad)

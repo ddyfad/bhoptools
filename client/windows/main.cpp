@@ -2,6 +2,7 @@
 #define _CRT_RAND_S
 #include <Windows.h>
 #include <winhttp.h>
+#include <CommCtrl.h>
 #include <atomic>
 #include <fstream>
 #include <functional>
@@ -28,6 +29,9 @@
 #include "spectate.h"
 #include "game_layout.h"
 #include "pollfix.h"
+
+// TaskDialog needs common controls v6.
+#pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 
 typedef void(__thiscall* CHostState_OnClientConnectedFn)(void*);
 CHostState_OnClientConnectedFn oCHostState_OnClientConnected;
@@ -494,6 +498,37 @@ bool dev::Download(const std::string& url, bool asset, const std::string& file)
 #else
 #define SETTINGS_DIR_W L"bhoptools"
 #endif
+
+// Update / Not now / Don't ask again. Returns IDYES, IDNO or IDCANCEL.
+static int AskUpdate(const wchar_t* text, const wchar_t* title)
+{
+	typedef HRESULT (WINAPI *TaskDialogIndirectFn)(const TASKDIALOGCONFIG*, int*, int*, BOOL*);
+	const HMODULE comctl = LoadLibraryW(L"comctl32.dll");
+	const auto taskDialog = comctl ? reinterpret_cast<TaskDialogIndirectFn>(GetProcAddress(comctl, "TaskDialogIndirect")) : nullptr;
+	if (taskDialog)
+	{
+		// Own ids, so closing the dialog (IDCANCEL) counts as "Not now".
+		const int kUpdate = 100, kNotNow = 101, kNever = 102;
+		const TASKDIALOG_BUTTON buttons[] = { { kUpdate, L"Update" }, { kNotNow, L"Not now" }, { kNever, L"Don't ask again" } };
+		TASKDIALOGCONFIG config = { sizeof(config) };
+		config.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+		config.pszWindowTitle = title;
+		config.pszMainIcon = TD_INFORMATION_ICON;
+		config.pszContent = text;
+		config.pButtons = buttons;
+		config.cButtons = 3;
+		config.nDefaultButton = kUpdate;
+		config.pfCallback = [](HWND hwnd, UINT msg, WPARAM, LPARAM, LONG_PTR) -> HRESULT {
+			if (msg == TDN_CREATED)
+				SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+			return S_OK;
+		};
+		int answer = 0;
+		if (SUCCEEDED(taskDialog(&config, &answer, NULL, NULL)))
+			return answer == kUpdate ? IDYES : answer == kNever ? IDCANCEL : IDNO;
+	}
+	return MessageBoxW(NULL, text, title, MB_YESNOCANCEL | MB_ICONINFORMATION | MB_TOPMOST);
+}
 
 // %APPDATA%\bhoptools\tmp (bhoptools-dev for the dev client), for downloads and the lump
 // checksums, with the .part files of downloads that never finished removed. A download still
@@ -1267,9 +1302,9 @@ bool SelfUpdate()
 	}
 	else
 	{
-		const std::string text = tag + " is out, you have " APP_VERSION ".\n\nChangelog:\n\n" + changelog + "\n\nYes: update now\nNo: ask again next time\nCancel: never check again (delete %APPDATA%\\bhoptools\\no_update_check to undo)";
+		const std::string text = tag + " is out, you have " APP_VERSION ".\n\nChangelog:\n\n" + changelog;
 		MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wtext, 2048);
-		const int answer = MessageBoxW(NULL, wtext, L"bhoptools update", MB_YESNOCANCEL | MB_ICONINFORMATION | MB_TOPMOST);
+		const int answer = AskUpdate(wtext, L"bhoptools update");
 		if (answer == IDCANCEL)
 		{
 			CreateDirectoryW(settingsDir.c_str(), NULL);
@@ -1374,10 +1409,10 @@ bool SelfUpdate()
 		}
 		if (ignored)
 			return false;
-		const std::string text = tag + " is out, you have " APP_VERSION ".\n\nChangelog:\n\n" + changelog + "\n\nYes: update now\nNo: ask again next time\nCancel: never check again (delete %APPDATA%\\bhoptools-dev\\no_update_check to undo)";
+		const std::string text = tag + " is out, you have " APP_VERSION ".\n\nChangelog:\n\n" + changelog;
 		wchar_t wtext[2048];
 		MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wtext, 2048);
-		const int answer = MessageBoxW(NULL, wtext, L"bhoptools dev update", MB_YESNOCANCEL | MB_ICONINFORMATION | MB_TOPMOST);
+		const int answer = AskUpdate(wtext, L"bhoptools dev update");
 		if (answer == IDCANCEL)
 		{
 			CreateDirectoryA(settings::Dir().c_str(), NULL);

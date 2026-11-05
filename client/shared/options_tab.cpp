@@ -56,6 +56,7 @@ const Row kRows[] = {
 	{ &Settings::predict,   nullptr,            L"prediction" },
 	{ &Settings::speedo,    &Settings::hudkeys, L"clientside hud fixes" },
 	{ &Settings::jsframe,   nullptr,            L"jumpstats trainers every frame (off: every tick)" },
+	{ &Settings::updates,   nullptr,            L"ask about updates when starting" },
 #ifdef _WIN32
 	{ &Settings::pollfix,   nullptr,            L"high polling rate fix (4-8 kHz mice: no fps loss while moving the mouse)" },
 #endif
