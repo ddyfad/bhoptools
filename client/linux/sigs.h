@@ -210,12 +210,6 @@ static const int VT_Surface_DrawSetTextPos   = 20;
 static const char RTTI_OptionsSubMultiplayer[] = "22COptionsSubMultiplayer";
 static const char RTTI_PropertySheet[]         = "N4vgui13PropertySheetE";
 
-// Reversal close-up: engine.so's CFocusOverlayPanel, the topmost popup, paints in PostChildPaint, the slot
-// before PerformLayout. jumpstats only hooks it if that is the one slot from Paint on it overrides.
-static const int VT_Panel_PostChildPaint     = 134;
-static const char RTTI_FocusOverlayPanel[]     = "18CFocusOverlayPanel";
-static const char RTTI_VguiPanel[]             = "N4vgui5PanelE";
-
 // materialsystem.so CShaderSystem::LoadTexture's leading-slash check (see singleletter_fix.cpp).
 static const char SIG_ShaderSystem_LoadTexture_SlashSkip[] =
 	"80 38 2F 49 89 C6 0F 84 ? ? ? ? 80 78 01 2F 0F 84 ? ? ? ?";

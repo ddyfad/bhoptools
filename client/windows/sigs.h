@@ -139,12 +139,6 @@ static const int VT_Surface_SetFontGlyphSet  = 67; // (HFont, name, tall, weight
 static const char RTTI_OptionsSubMultiplayer[] = ".?AVCOptionsSubMultiplayer@@";
 static const char RTTI_PropertySheet[]         = ".?AVPropertySheet@vgui@@";
 
-// Reversal close-up: engine.dll's CFocusOverlayPanel, the topmost popup, paints in PostChildPaint, the slot
-// before PerformLayout. jumpstats only hooks it if that is the one slot from Paint on it overrides.
-static const int VT_Panel_PostChildPaint     = 133;
-static const char RTTI_FocusOverlayPanel[]     = ".?AVCFocusOverlayPanel@@";
-static const char RTTI_VguiPanel[]             = ".?AVPanel@vgui@@";
-
 static const char RTTI_CSPlayer[] = ".?AVC_CSPlayer@@";
 static const int VT_CSPlayer_Interpolate       = 97;  // (float currentTime)
 static const int VT_CSPlayer_ShouldInterpolate = 151;

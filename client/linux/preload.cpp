@@ -610,11 +610,9 @@ static int Bhoptools_SDLWatch(void* /*userdata*/, SDL_Event* ev)
 	static bool optionsDone = false;
 	static double optionsNext = 0.0;
 	static bool spectateDone = false;
-	static bool paintDone = false;
-	if ((!optionsDone || !spectateDone || !paintDone) && g_originalGetAccumulatedMouseDeltas && plat_now() >= optionsNext) {
+	if ((!optionsDone || !spectateDone) && g_originalGetAccumulatedMouseDeltas && plat_now() >= optionsNext) {
 		if (!optionsDone) optionsDone = options::Install();
 		if (!spectateDone) spectateDone = spectate::Install();
-		if (!paintDone) paintDone = js::InstallPaint();
 		optionsNext = plat_now() + 1.0;
 	}
 	if (ev->type == SDL_KEYDOWN) {

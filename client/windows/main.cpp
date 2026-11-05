@@ -215,11 +215,9 @@ LRESULT __fastcall Hooked_WindowProc(void* thisptr, HWND hwnd, UINT uMsg, WPARAM
 	static bool optionsDone = false;
 	static ULONGLONG optionsNext = 0;
 	static bool spectateDone = false;
-	static bool paintDone = false;
-	if ((!optionsDone || !spectateDone || !paintDone) && g_hotkeyReady && GetTickCount64() >= optionsNext) {
+	if ((!optionsDone || !spectateDone) && g_hotkeyReady && GetTickCount64() >= optionsNext) {
 		if (!optionsDone) optionsDone = options::Install();
 		if (!spectateDone) spectateDone = spectate::Install();
-		if (!paintDone) paintDone = js::InstallPaint();
 		optionsNext = GetTickCount64() + 1000;
 	}
 	switch (uMsg)
@@ -818,7 +816,6 @@ DWORD InjectionEntryPoint(DWORD processID)
 	speedo::Detach();
 	options::Uninstall();
 	spectate::Uninstall();
-	js::UninstallPaint();
 	if (g_inputCreateMoveSlot)
 		PatchPointer(g_inputCreateMoveSlot, reinterpret_cast<void*>(oInputCreateMove));
 	if (levelInitHooked)
