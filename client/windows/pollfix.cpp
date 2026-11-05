@@ -28,6 +28,7 @@ PeekMessageFn oPeekMessageA;
 PeekMessageFn oPeekMessageW;
 
 int (*g_drain)();
+bool (*g_rawActive)();
 LONGLONG g_freq;
 DWORD g_gameThread;
 HWND g_gameWindow;
@@ -43,6 +44,7 @@ struct Stats {
 	unsigned msgInput, msgMouseMove, msgNcMouseMove, msgMouseOther, msgKey, msgOther;
 	unsigned procInput, procMouseMove, procHitTest, procSetCursor, procOther;
 	unsigned drains, rawReports;
+	unsigned noLegacyPumps, reregisters, postedButtons;
 	Shape shapes[8];
 	int shapeCount;
 };
@@ -56,11 +58,77 @@ bool g_filtering;
 LONGLONG g_pumpStart;
 bool g_tookMouseMove, g_tookNcMouseMove, g_tookUnfiltered;
 
+// No-legacy mode: the mouse registered with RIDEV_NOLEGACY while looking around, so Windows stops
+// making a WM_MOUSEMOVE (with its WM_NCHITTEST and WM_SETCURSOR) for every report. Filtering the
+// pump still leaves win32k doing that work per report; this is the only way to stop it.
+bool g_noLegacyWanted;
+bool g_noLegacyOn;
+WPARAM g_buttonsDown;  // MK_* we've posted down and not up
+
 LONGLONG Now()
 {
 	LARGE_INTEGER t;
 	QueryPerformanceCounter(&t);
 	return t.QuadPart;
+}
+
+bool FindMouseRegistration(RAWINPUTDEVICE& out)
+{
+	RAWINPUTDEVICE devs[16];
+	UINT n = 16;
+	n = GetRegisteredRawInputDevices(devs, &n, sizeof(RAWINPUTDEVICE));
+	if (n == (UINT)-1) return false;
+	for (UINT i = 0; i < n; ++i) {
+		if (devs[i].usUsagePage == 1 && devs[i].usUsage == 2) {
+			out = devs[i];
+			return true;
+		}
+	}
+	return false;
+}
+
+void PostButton(UINT msg, WPARAM extra = 0)
+{
+	POINT p;
+	GetCursorPos(&p);
+	ScreenToClient(g_gameWindow, &p);
+	PostMessageW(g_gameWindow, msg, g_buttonsDown | extra, MAKELPARAM(p.x, p.y));
+	g_s.postedButtons++;
+}
+
+void ReleaseButtons()
+{
+	const struct { WPARAM mk; UINT up; WPARAM x; } buttons[] = {
+		{ MK_LBUTTON, WM_LBUTTONUP, 0 }, { MK_RBUTTON, WM_RBUTTONUP, 0 }, { MK_MBUTTON, WM_MBUTTONUP, 0 },
+		{ MK_XBUTTON1, WM_XBUTTONUP, MAKEWPARAM(0, XBUTTON1) }, { MK_XBUTTON2, WM_XBUTTONUP, MAKEWPARAM(0, XBUTTON2) },
+	};
+	for (const auto& b : buttons) {
+		if (!(g_buttonsDown & b.mk)) continue;
+		g_buttonsDown &= ~b.mk;
+		PostButton(b.up, b.x);
+	}
+}
+
+// Once per pump: no-legacy only while the game is in front with the cursor hidden (menus need the
+// cursor messages) and our raw path sees every report (it posts the buttons).
+void UpdateNoLegacy()
+{
+	CURSORINFO ci = { sizeof(ci) };
+	const bool want = g_noLegacyWanted && g_rawActive && g_rawActive() && g_gameWindow
+		&& GetForegroundWindow() == g_gameWindow
+		&& GetCursorInfo(&ci) && (!(ci.flags & CURSOR_SHOWING) || !ci.hCursor);
+	if (want == g_noLegacyOn) return;
+	RAWINPUTDEVICE d;
+	if (!FindMouseRegistration(d)) return;
+	d.dwFlags = want ? (d.dwFlags | RIDEV_NOLEGACY) : (d.dwFlags & ~RIDEV_NOLEGACY);
+	if (!RegisterRawInputDevices(&d, 1, sizeof(d))) {
+		CoreLog("no-legacy: RegisterRawInputDevices failed (%lu), turning it off", GetLastError());
+		g_noLegacyWanted = false;
+		return;
+	}
+	g_noLegacyOn = want;
+	g_s.reregisters++;
+	if (!want) ReleaseButtons();
 }
 
 double Ms(LONGLONG ticks) { return ticks * 1000.0 / g_freq; }
@@ -113,6 +181,8 @@ BOOL Pump(PeekMessageFn fn, LPMSG msg, HWND hwnd, UINT flags)
 		g_pumpStart = now;
 		g_s.pumps++;
 		g_tookMouseMove = g_tookNcMouseMove = g_tookUnfiltered = false;
+		UpdateNoLegacy();
+		if (g_noLegacyOn) g_s.noLegacyPumps++;
 		g_filtering = g_drain && settings::Get().pollfix && GetForegroundWindow() == g_gameWindow;
 		if (g_filtering) {
 			g_s.filtered++;
@@ -204,6 +274,8 @@ void Cmd_PumpStats(const CCommandX&)
 		g_s.msgInput, g_s.msgMouseMove, g_s.msgNcMouseMove, g_s.msgMouseOther, g_s.msgKey, g_s.msgOther);
 	CoreLog("  window proc: %u WM_INPUT, %u WM_MOUSEMOVE, %u WM_NCHITTEST, %u WM_SETCURSOR, %u other; raw: %u reports in %u batch reads",
 		g_s.procInput, g_s.procMouseMove, g_s.procHitTest, g_s.procSetCursor, g_s.procOther, g_s.rawReports, g_s.drains);
+	CoreLog("  no-legacy %s: on for %u of %u pumps, %u re-registrations, %u buttons/wheel posted",
+		g_noLegacyWanted ? "wanted" : "off", g_s.noLegacyPumps, g_s.pumps, g_s.reregisters, g_s.postedButtons);
 	for (int i = 0; i < g_s.shapeCount; ++i) {
 		const Shape& s = g_s.shapes[i];
 		CoreLog("  PeekMessage(hwnd=%p, %u..%u, flags 0x%x) from %s: %u calls", s.hwnd, s.min, s.max, s.flags, s.from ? s.from : "elsewhere", s.count);
@@ -222,13 +294,20 @@ void Cmd_PollFix(const CCommandX& c)
 	CoreLog("bhoptools_pollfix %d%s", settings::Get().pollfix ? 1 : 0, g_drain ? "" : " (unavailable, see the missing signature above)");
 }
 
-ConCommandX g_cmds[2];
+void Cmd_NoLegacy(const CCommandX& c)
+{
+	if (c.argc > 1) g_noLegacyWanted = atoi(c.argv[1]) != 0;
+	CoreLog("bhoptools_nolegacy %d (%s now)", g_noLegacyWanted ? 1 : 0, g_noLegacyOn ? "on" : "off");
+}
+
+ConCommandX g_cmds[3];
 
 }  // namespace
 
-void Init(int (*drain)())
+void Init(int (*drain)(), bool (*rawActive)())
 {
 	g_drain = drain;
+	g_rawActive = rawActive;
 	LARGE_INTEGER f;
 	QueryPerformanceFrequency(&f);
 	g_freq = f.QuadPart;
@@ -279,6 +358,30 @@ void OnWindowMessage(HWND hwnd, UINT msg)
 	else g_s.procOther++;
 }
 
+void OnRawMouse(const RAWMOUSE& m)
+{
+	if (!g_noLegacyOn || !m.usButtonFlags) return;
+	const USHORT f = m.usButtonFlags;
+	const struct { USHORT down, up; WPARAM mk; UINT msgDown, msgUp; WPARAM x; } buttons[] = {
+		{ RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_LEFT_BUTTON_UP, MK_LBUTTON, WM_LBUTTONDOWN, WM_LBUTTONUP, 0 },
+		{ RI_MOUSE_RIGHT_BUTTON_DOWN, RI_MOUSE_RIGHT_BUTTON_UP, MK_RBUTTON, WM_RBUTTONDOWN, WM_RBUTTONUP, 0 },
+		{ RI_MOUSE_MIDDLE_BUTTON_DOWN, RI_MOUSE_MIDDLE_BUTTON_UP, MK_MBUTTON, WM_MBUTTONDOWN, WM_MBUTTONUP, 0 },
+		{ RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP, MK_XBUTTON1, WM_XBUTTONDOWN, WM_XBUTTONUP, MAKEWPARAM(0, XBUTTON1) },
+		{ RI_MOUSE_BUTTON_5_DOWN, RI_MOUSE_BUTTON_5_UP, MK_XBUTTON2, WM_XBUTTONDOWN, WM_XBUTTONUP, MAKEWPARAM(0, XBUTTON2) },
+	};
+	for (const auto& b : buttons) {
+		if (f & b.down) { g_buttonsDown |= b.mk; PostButton(b.msgDown, b.x); }
+		if (f & b.up) { g_buttonsDown &= ~b.mk; PostButton(b.msgUp, b.x); }
+	}
+	if (f & RI_MOUSE_WHEEL) {
+		// Wheel messages carry screen coordinates, unlike the buttons.
+		POINT p;
+		GetCursorPos(&p);
+		PostMessageW(g_gameWindow, WM_MOUSEWHEEL, MAKEWPARAM(g_buttonsDown, (SHORT)m.usButtonData), MAKELPARAM(p.x, p.y));
+		g_s.postedButtons++;
+	}
+}
+
 void CountRaw(int reports)
 {
 	if (reports <= 0) return;
@@ -298,11 +401,12 @@ void RegisterCommands()
 		CoreLog("pollfix: couldn't register bhoptools_pumpstats and bhoptools_pollfix");
 		return;
 	}
-	const struct { const char* name; const char* help; void (*fn)(const CCommandX&); } defs[2] = {
+	const struct { const char* name; const char* help; void (*fn)(const CCommandX&); } defs[3] = {
 		{ "bhoptools_pumpstats", "Print and reset what the message pump cost since the last print.", Cmd_PumpStats },
 		{ "bhoptools_pollfix", "High polling rate fix: filter the message pump the way Godot does (0/1, off by default).", Cmd_PollFix },
+		{ "bhoptools_nolegacy", "Stop Windows making cursor messages for every mouse report while looking around (0/1, off by default).", Cmd_NoLegacy },
 	};
-	for (int i = 0; i < 2; ++i) {
+	for (int i = 0; i < 3; ++i) {
 		ConCommandX& c = g_cmds[i];
 		c.vtable = *reinterpret_cast<void**>(echo);
 		c.name = defs[i].name;

@@ -77,6 +77,7 @@ void AddRawMouse(const RAWINPUT* ri)
 	{
 		*m_mouseRawAccumX += ri->data.mouse.lLastX;
 		*m_mouseRawAccumY += ri->data.mouse.lLastY;
+		pollfix::OnRawMouse(ri->data.mouse);
 	}
 }
 
@@ -100,6 +101,12 @@ int DrainRawInput()
 	}
 	pollfix::CountRaw(total);
 	return total;
+}
+
+// Every mouse report reaches AddRawMouse: Hooked_WindowProc takes WM_INPUT itself on this condition.
+bool RawPathActive()
+{
+	return g_rawInput2Ready && *m_bRawInputSupported && m_rawinput_cvar && *m_rawinput_cvar != 0;
 }
 
 // The batch read the high polling rate fix does at the start of each pump, in place of the
@@ -630,7 +637,7 @@ DWORD InjectionEntryPoint(DWORD processID)
 		CoreLog("m_rawinput 2: disabled, see the missing signature above");
 	}
 	// Needs only the accumulators: it serves m_rawinput 1 without the interpolation too.
-	pollfix::Init(m_mouseRawAccumX ? DrainRawInputForPump : nullptr);
+	pollfix::Init(m_mouseRawAccumX ? DrainRawInputForPump : nullptr, RawPathActive);
 
 	// The LEA at +25 loads gHUD.
 	auto ClientModeShared_Init = FindPatternLogged("client.dll", "ClientModeShared::Init", "48 89 5C 24 ? 48 89 74 24 ? 57 48 83 EC 30 48 8B F1 48 8D 15");
