@@ -32,6 +32,7 @@ bool (*g_rawActive)();
 LONGLONG g_freq;
 DWORD g_gameThread;
 HWND g_gameWindow;
+UINT g_shutdownMsg;  // sent by Shutdown, handled in OnWindowMessage
 MemRange g_callers[2];  // inputsystem.dll and engine.dll: only their pumps are filtered
 
 // Distinct PeekMessage shapes seen on the game thread, to know what the pump really looks like.
@@ -342,6 +343,7 @@ void Init(int (*drain)(), bool (*rawActive)())
 	QueryPerformanceFrequency(&f);
 	g_freq = f.QuadPart;
 	g_frametimes.reserve(kMaxFrametimes);
+	g_shutdownMsg = RegisterWindowMessageW(L"bhoptools_pollfix_shutdown");
 	const char* modules[2] = { "inputsystem.dll", "engine.dll" };
 	for (int i = 0; i < 2; ++i) {
 		MODULEINFO mi{};
@@ -375,17 +377,31 @@ void Detach()
 	if (oPeekMessageW) DetourDetach(&(PVOID&)oPeekMessageW, Hooked_PeekMessageW);
 }
 
-void OnWindowMessage(HWND hwnd, UINT msg)
+void Shutdown()
+{
+	// The registration, the window and the posted buttons all belong to the game thread, so it
+	// does the work. The timeout covers a map load, which doesn't pump.
+	if (g_gameWindow && g_shutdownMsg)
+		SendMessageTimeoutW(g_gameWindow, g_shutdownMsg, 0, 0, SMTO_NORMAL, 10000, nullptr);
+}
+
+bool OnWindowMessage(HWND hwnd, UINT msg)
 {
 	if (!g_gameWindow) {
 		g_gameWindow = hwnd;
 		g_gameThread = GetCurrentThreadId();
+	}
+	if (g_shutdownMsg && msg == g_shutdownMsg) {
+		g_noLegacyWanted = false;
+		UpdateNoLegacy(false);
+		return true;
 	}
 	if (msg == WM_INPUT) g_s.procInput++;
 	else if (msg == WM_MOUSEMOVE) g_s.procMouseMove++;
 	else if (msg == WM_NCHITTEST) g_s.procHitTest++;
 	else if (msg == WM_SETCURSOR) g_s.procSetCursor++;
 	else g_s.procOther++;
+	return false;
 }
 
 // Another PeekMessage hook installed after ours (an overlay) hides the pump's caller, and then

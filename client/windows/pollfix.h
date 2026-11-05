@@ -13,9 +13,13 @@ void Init(int (*drain)(), bool (*rawActive)());
 // Inside a Detours transaction.
 void Attach();
 void Detach();
+// From the unloading thread, before the hooks come off: has the game thread put the mouse back to
+// its normal registration and release any buttons no-legacy posted down.
+void Shutdown();
 
 // From CInputSystem::WindowProc: learns the game's thread and window, counts the message.
-void OnWindowMessage(HWND hwnd, UINT msg);
+// True for Shutdown's message, which the caller should not pass on.
+bool OnWindowMessage(HWND hwnd, UINT msg);
 void CountRaw(int reports);
 // Once a frame on the game thread: re-evaluates no-legacy if no recognised pump did, and turns it
 // off if none has been seen for 100 ms.

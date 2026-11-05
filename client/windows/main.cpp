@@ -257,7 +257,8 @@ void Cmd_DevBuilds(const CCommandX&)
 
 LRESULT __fastcall Hooked_WindowProc(void* thisptr, HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
-	pollfix::OnWindowMessage(hwnd, uMsg);
+	if (pollfix::OnWindowMessage(hwnd, uMsg))
+		return 0;
 	// Does what CInputSystem::WindowProc would (add lLastX/Y to its accumulators), then takes the
 	// rest of the queue in one go. DefWindowProc does the WM_INPUT cleanup the docs ask for.
 	if (uMsg == WM_INPUT && g_rawInput2Ready && *m_bRawInputSupported)
@@ -990,6 +991,8 @@ DWORD InjectionEntryPoint(DWORD processID)
 		VirtualProtect(jumpPred, sizeof(jumpPredOriginalBytes), jumpPredOriginalProtect, &jumpPredOriginalProtect);
 	}
 
+	// Needs Hooked_WindowProc still attached.
+	pollfix::Shutdown();
 	DetourTransactionBegin();
 	DetourUpdateThread(GetCurrentThread());
 	if (oCHostState_OnClientConnected)
