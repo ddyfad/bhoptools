@@ -1,0 +1,2 @@
+// The exe icon. The staging workflow copies bhoptools-dev.ico over bhoptools.ico for bhoptools-dev.
+1 ICON "bhoptools.ico"

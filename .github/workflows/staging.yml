@@ -145,6 +145,7 @@ jobs:
           if ('${{ matrix.variant }}' -eq 'dev') {
             # cl.exe takes extra options from CL.
             $env:CL = '/DBHOPTOOLS_DEV'
+            Copy-Item client/windows/bhoptools-dev.ico client/windows/bhoptools.ico -Force
           }
           msbuild client/bhoptools.sln /p:Configuration=Release /p:Platform=x64 /p:TargetName=$env:NAME /m /v:minimal
           if ($LASTEXITCODE) { exit $LASTEXITCODE }

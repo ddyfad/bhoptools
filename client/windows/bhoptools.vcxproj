@@ -19,6 +19,9 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <ResourceCompile Include="bhoptools.rc" />
+  </ItemGroup>
+  <ItemGroup>
     <ClCompile Include="Detours\src\detours.cpp" />
     <ClCompile Include="Detours\src\disasm.cpp" />
     <ClCompile Include="Detours\src\modules.cpp" />
