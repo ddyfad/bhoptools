@@ -45,6 +45,7 @@ struct Stats {
 	unsigned procInput, procMouseMove, procHitTest, procSetCursor, procOther;
 	unsigned drains, rawReports;
 	unsigned noLegacyPumps, reregisters, postedButtons;
+	unsigned offNotFront, offNoRaw, offCursor, cursorHidden, cursorClipped;
 	Shape shapes[8];
 	int shapeCount;
 };
@@ -109,14 +110,36 @@ void ReleaseButtons()
 	}
 }
 
-// Once per pump: no-legacy only while the game is in front with the cursor hidden (menus need the
+// The game is looking around rather than showing a menu: the cursor is hidden, or clipped to a
+// part of the game window. Each is counted, to learn which one CS:S actually gives.
+bool InGame()
+{
+	CURSORINFO ci = { sizeof(ci) };
+	const bool hidden = GetCursorInfo(&ci) && (!(ci.flags & CURSOR_SHOWING) || !ci.hCursor);
+	RECT clip, win;
+	const bool clipped = GetClipCursor(&clip) && GetWindowRect(g_gameWindow, &win)
+		&& clip.left >= win.left && clip.top >= win.top && clip.right <= win.right && clip.bottom <= win.bottom
+		&& (clip.right - clip.left < GetSystemMetrics(SM_CXVIRTUALSCREEN) || clip.bottom - clip.top < GetSystemMetrics(SM_CYVIRTUALSCREEN));
+	if (hidden) g_s.cursorHidden++;
+	if (clipped) g_s.cursorClipped++;
+	return hidden || clipped;
+}
+
+// Once per pump: no-legacy only while the game is in front and looking around (menus need the
 // cursor messages) and our raw path sees every report (it posts the buttons).
 void UpdateNoLegacy()
 {
-	CURSORINFO ci = { sizeof(ci) };
-	const bool want = g_noLegacyWanted && g_rawActive && g_rawActive() && g_gameWindow
-		&& GetForegroundWindow() == g_gameWindow
-		&& GetCursorInfo(&ci) && (!(ci.flags & CURSOR_SHOWING) || !ci.hCursor);
+	bool want = false;
+	if (!g_noLegacyWanted || !g_gameWindow) {
+	} else if (GetForegroundWindow() != g_gameWindow) {
+		g_s.offNotFront++;
+	} else if (!g_rawActive || !g_rawActive()) {
+		g_s.offNoRaw++;
+	} else if (!InGame()) {
+		g_s.offCursor++;
+	} else {
+		want = true;
+	}
 	if (want == g_noLegacyOn) return;
 	RAWINPUTDEVICE d;
 	if (!FindMouseRegistration(d)) return;
@@ -276,6 +299,9 @@ void Cmd_PumpStats(const CCommandX&)
 		g_s.procInput, g_s.procMouseMove, g_s.procHitTest, g_s.procSetCursor, g_s.procOther, g_s.rawReports, g_s.drains);
 	CoreLog("  no-legacy %s: on for %u of %u pumps, %u re-registrations, %u buttons/wheel posted",
 		g_noLegacyWanted ? "wanted" : "off", g_s.noLegacyPumps, g_s.pumps, g_s.reregisters, g_s.postedButtons);
+	if (g_noLegacyWanted)
+		CoreLog("  no-legacy off because: %u not in front, %u raw input not active, %u in a menu; in game by: %u cursor hidden, %u cursor clipped",
+			g_s.offNotFront, g_s.offNoRaw, g_s.offCursor, g_s.cursorHidden, g_s.cursorClipped);
 	for (int i = 0; i < g_s.shapeCount; ++i) {
 		const Shape& s = g_s.shapes[i];
 		CoreLog("  PeekMessage(hwnd=%p, %u..%u, flags 0x%x) from %s: %u calls", s.hwnd, s.min, s.max, s.flags, s.from ? s.from : "elsewhere", s.count);
