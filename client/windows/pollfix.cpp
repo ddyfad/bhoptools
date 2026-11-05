@@ -45,7 +45,7 @@ struct Stats {
 	unsigned msgInput, msgMouseMove, msgNcMouseMove, msgMouseOther, msgKey, msgOther;
 	unsigned procInput, procMouseMove, procHitTest, procSetCursor, procOther;
 	unsigned drains, rawReports;
-	unsigned noLegacyPumps, reregisters, postedButtons;
+	unsigned noLegacyPumps, reregisters, postedButtons, emptyWheels;
 	unsigned offNotFront, offNoRaw, offCursor, offNoPump;
 	Shape shapes[8];
 	int shapeCount;
@@ -305,8 +305,8 @@ void Cmd_PumpStats(const CCommandX&)
 		g_s.msgInput, g_s.msgMouseMove, g_s.msgNcMouseMove, g_s.msgMouseOther, g_s.msgKey, g_s.msgOther);
 	CoreLog("  window proc: %u WM_INPUT, %u WM_MOUSEMOVE, %u WM_NCHITTEST, %u WM_SETCURSOR, %u other; raw: %u reports in %u batch reads",
 		g_s.procInput, g_s.procMouseMove, g_s.procHitTest, g_s.procSetCursor, g_s.procOther, g_s.rawReports, g_s.drains);
-	CoreLog("  no-legacy %s: on for %u of %u pumps, %u re-registrations, %u buttons/wheel posted",
-		g_noLegacyWanted && settings::Get().pollfix ? "wanted" : "off", g_s.noLegacyPumps, g_s.pumps, g_s.reregisters, g_s.postedButtons);
+	CoreLog("  no-legacy %s: on for %u of %u pumps, %u re-registrations, %u buttons/wheel posted, %u empty wheel reports dropped",
+		g_noLegacyWanted && settings::Get().pollfix ? "wanted" : "off", g_s.noLegacyPumps, g_s.pumps, g_s.reregisters, g_s.postedButtons, g_s.emptyWheels);
 	if (g_noLegacyWanted && settings::Get().pollfix)
 		CoreLog("  no-legacy off because: %u not in front, %u raw input not active, %u in a menu or the console, %u no pump seen",
 			g_s.offNotFront, g_s.offNoRaw, g_s.offCursor, g_s.offNoPump);
@@ -434,7 +434,11 @@ void OnRawMouse(const RAWMOUSE& m)
 		if (f & b.down) { g_buttonsDown |= b.mk; PostButton(b.msgDown, b.x); }
 		if (f & b.up) { g_buttonsDown &= ~b.mk; PostButton(b.msgUp, b.x); }
 	}
-	if (f & RI_MOUSE_WHEEL) {
+	// The engine takes any wheel delta that isn't above 0 as wheel down, so an empty one would be a mwheeldown.
+	// Turning no-legacy on was jumping players bound to it.
+	if ((f & RI_MOUSE_WHEEL) && (SHORT)m.usButtonData == 0) {
+		g_s.emptyWheels++;
+	} else if (f & RI_MOUSE_WHEEL) {
 		// Wheel messages carry screen coordinates, unlike the buttons.
 		POINT p;
 		GetCursorPos(&p);
