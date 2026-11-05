@@ -81,6 +81,7 @@ const int kClientJumpstats6 = 1 << 25;  // the gain modes and the compact traine
 // 1 << 26 was the reversal close-up, since taken out of the plugin
 const int kClientJumpstats8 = 1 << 27;  // linear gain
 const int kClientJumpstats9 = 1 << 28;  // the slow ticks HUD
+const int kClientJumpstats10 = 1 << 29; // ShowYaws at its own position and channel group
 const int kClientHold = 1 << 20;
 const int kMenuKeySave = 1 << 0;     // bhoptools_menu keys
 const int kMenuKeyTele = 1 << 1;
@@ -190,7 +191,7 @@ int32_t g_frameX[kFrameBatch], g_frameY[kFrameBatch];
 int    g_capsCmd;        // saves after this command get acked
 int    g_serverFlags;
 bool   g_lastKz;
-int    g_clientFlags = kClientMenus | kClientRngfix | kClientAutobhop | kClientNoclip | kClientMove | kClientUntouch | kClientMsf | kClientState | kClientCpset | kClientKeys | kClientRestart | kClientAutosync | kClientZones | kClientTeleportView | kClientMenuSound | kClientJumpstats | kClientJumpstats2 | kClientJumpstats3 | kClientJumpstats4 | kClientJumpstats5 | kClientJumpstats6 | kClientJumpstats8 | kClientJumpstats9 | kClientHold;
+int    g_clientFlags = kClientMenus | kClientRngfix | kClientAutobhop | kClientNoclip | kClientMove | kClientUntouch | kClientMsf | kClientState | kClientCpset | kClientKeys | kClientRestart | kClientAutosync | kClientZones | kClientTeleportView | kClientMenuSound | kClientJumpstats | kClientJumpstats2 | kClientJumpstats3 | kClientJumpstats4 | kClientJumpstats5 | kClientJumpstats6 | kClientJumpstats8 | kClientJumpstats9 | kClientJumpstats10 | kClientHold;
 NcLog  g_noclip;
 int    g_noclipAllow = NC_ALLOW_ALL;
 // Servers without bhoptools_cpset restore both.
@@ -582,14 +583,35 @@ void ReadState(const CCommandX& c, Slot* s)
 	s->ducking  = ArgInt(c, 21) != 0;
 }
 
+// shavit's maxcp goes up to 10000. Until the server has sent its own, a number past 1000 is taken
+// as a bad message.
+const int kCpIndexLimit = 10000;
+
+bool ValidCpIndex(int index)
+{
+	const int cap = g_cpMax > 0 ? (g_cpMax < kCpIndexLimit ? g_cpMax : kCpIndexLimit) : 1000;
+	return index >= 1 && index <= cap;
+}
+
 // Keeps the trigger sim snapshot id while the number still holds the same checkpoint;
 // after shavit renumbers, the id would belong to another one.
 void Remember(Slot& s)
 {
+	if (!ValidCpIndex(s.index)) return;
 	if ((int)g_cps.size() <= s.index) g_cps.resize(s.index + 1);
 	Slot& m = g_cps[s.index];
 	if (m.index && memcmp(&m.origin, &s.origin, sizeof(Vec)) == 0) s.id = m.id;
 	m = s;
+}
+
+// Whether a trigger sim snapshot id can still be teleported to.
+bool SnapshotInUse(int id)
+{
+	for (int i = 0; i < g_slotCount; ++i)
+		if (g_slots[i].id == id) return true;
+	for (const Slot& s : g_cps)
+		if (s.index && s.id == id) return true;
+	return g_hold.active && g_hold.slot.id == id;
 }
 
 // <flags> <x> <y> <z> <pitch> <yaw> <gravity> <laggedmovement> from argument `first`, floats as bits.
@@ -659,7 +681,8 @@ void Cmd_Ack(const CCommandX& c)
 	DropLost(cmdnum);
 
 	if (kind == 's') {
-		if (!index || c.argc < 22) {
+		// A number out of range is taken like a refused save.
+		if (!ValidCpIndex(index) || c.argc < 22) {
 			if (Slot* s = FindSlot(cmdnum)) RemoveSlot(s);
 			RedrawMenu();
 			return;
@@ -669,7 +692,7 @@ void Cmd_Ack(const CCommandX& c)
 		g_lastKz = s->kz;
 		Remember(*s);
 	} else if (kind == 'l') {
-		if (!index || c.argc < 22) return;
+		if (!ValidCpIndex(index) || c.argc < 22) return;
 		Slot s = {};
 		ReadState(c, &s);
 		Remember(s);
@@ -707,9 +730,11 @@ void Cmd_Ack(const CCommandX& c)
 			break;
 		}
 	} else if (kind == 'n') {
+		const int max = ArgInt(c, 5);
+		if (index < 0 || index > kCpIndexLimit || max < 0 || max > kCpIndexLimit) return;
 		g_cpTotal = index;
 		g_cpTotalCmd = cmdnum;
-		g_cpMax = ArgInt(c, 5);
+		g_cpMax = max;
 		const int keep = CountWithPending(INT_MAX);
 		if ((int)g_cps.size() > keep + 1) g_cps.resize(keep + 1);
 	} else if (kind == 'o') {
@@ -1547,7 +1572,7 @@ int CommandKey(void* player, void* mv)
 int HelloFlags()
 {
 	int flags = g_on ? g_clientFlags : g_clientFlags & ~kClientTriggers;
-	if (!settings::Get().speedo) flags &= ~(kClientJumpstats | kClientJumpstats2 | kClientJumpstats3 | kClientJumpstats4 | kClientJumpstats5 | kClientJumpstats6 | kClientJumpstats8 | kClientJumpstats9);
+	if (!settings::Get().speedo) flags &= ~(kClientJumpstats | kClientJumpstats2 | kClientJumpstats3 | kClientJumpstats4 | kClientJumpstats5 | kClientJumpstats6 | kClientJumpstats8 | kClientJumpstats9 | kClientJumpstats10);
 	return flags;
 }
 
@@ -2005,6 +2030,7 @@ void Hooked_ProcessMovement(void* self, void* player, void* mv)
 		} else {
 			Save(player, mv, key);
 			TeleportPredict_OnCheckpointSave(FindSlot(key)->id);
+			TeleportPredict_PruneCheckpoints(SnapshotInUse);
 			if (firstRun) {
 				if (!menuSave) PrintSaved(key);
 				RedrawMenu();

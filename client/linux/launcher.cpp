@@ -9,7 +9,11 @@
 #include <sys/stat.h>
 #include <pwd.h>
 
+#ifdef BHOPTOOLS_DEV
+static const char* PRELOAD_NAME = "bhoptools-dev.so";
+#else
 static const char* PRELOAD_NAME = "bhoptools.so";
+#endif
 
 static bool path_exists(const char* p)
 {
@@ -84,8 +88,23 @@ int main()
 	char so_path[PATH_MAX];
 	snprintf(so_path, sizeof(so_path), "%s/%s", dir, PRELOAD_NAME);
 
+#ifdef BHOPTOOLS_DEV
+	printf("bhoptools dev -- Linux\n");
+	printf("=========================\n\n");
+	// Same folder as settings::Dir().
+	char token[PATH_MAX];
+	const char* xdg = getenv("XDG_CONFIG_HOME");
+	const char* h = home_dir();
+	if (xdg && *xdg) snprintf(token, sizeof(token), "%s/bhoptools-dev/github_token.txt", xdg);
+	else snprintf(token, sizeof(token), "%s/.config/bhoptools-dev/github_token.txt", h ? h : "~");
+	if (!path_exists(token)) {
+		printf("No GitHub token, so no dev build updates. Save a read-only token for\n");
+		printf("ddyfad/bhoptools-staging in\n  %s\n(STAGING.md says how).\n\n", token);
+	}
+#else
 	printf("bhoptools -- Linux\n");
 	printf("=========================\n\n");
+#endif
 	printf("m_rawinput 2 style mouse interpolation (Options > Fixes, sets m_rawinput)\n");
 	printf("F8 toggles all client-side prediction (on by default)\n");
 	printf("checkpoints and noclip predicted on servers running the bhoptools plugin\n");

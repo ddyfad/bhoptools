@@ -34,10 +34,28 @@
     <ClCompile Include="..\shared\spectate.cpp" />
     <ClCompile Include="..\shared\download_progress.cpp" />
     <ClCompile Include="..\shared\fastdl.cpp" />
+    <ClCompile Include="..\shared\release_sig.cpp" />
+    <!-- Built as C++, as g++ builds them on Linux: sha256.h has no extern "C". -->
+    <ClCompile Include="..\shared\vendor\monocypher\monocypher.c">
+      <CompileAs>CompileAsCpp</CompileAs>
+      <SDLCheck>false</SDLCheck>
+    </ClCompile>
+    <ClCompile Include="..\shared\vendor\monocypher\monocypher-ed25519.c">
+      <CompileAs>CompileAsCpp</CompileAs>
+      <SDLCheck>false</SDLCheck>
+    </ClCompile>
+    <ClCompile Include="..\shared\vendor\sha256\sha256.c">
+      <CompileAs>CompileAsCpp</CompileAs>
+      <SDLCheck>false</SDLCheck>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Detours\src\detours.h" />
     <ClInclude Include="utils.h" />
+    <ClInclude Include="..\shared\release_sig.h" />
+    <ClInclude Include="..\shared\vendor\monocypher\monocypher.h" />
+    <ClInclude Include="..\shared\vendor\monocypher\monocypher-ed25519.h" />
+    <ClInclude Include="..\shared\vendor\sha256\sha256.h" />
     <ClInclude Include="sigs.h" />
     <ClInclude Include="..\shared\teleport_predict.h" />
     <ClInclude Include="..\shared\speedo.h" />

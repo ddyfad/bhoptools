@@ -10,3 +10,5 @@ hudkeys_test
 mapdiff_test
 zones_test
 jumpstats_test
+release_sig_test
+check_sums

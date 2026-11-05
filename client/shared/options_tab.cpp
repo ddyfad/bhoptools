@@ -40,7 +40,11 @@ const char kFace[] = "Tahoma";
 // Steam's runtime ships it; Tahoma would go through fontconfig to whatever it picks.
 const char kFace[] = "DejaVu Sans";
 #endif
+#ifdef BHOPTOOLS_DEV
+const char kTitle[] = "bhoptools dev";
+#else
 const char kTitle[] = "bhoptools";
+#endif
 
 struct Row {
 	bool Settings::* value;

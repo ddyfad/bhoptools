@@ -14,7 +14,7 @@ on:
           - both
         default: client
       release_tag:
-        description: "Client version to publish (e.g. 1.3). Leave empty to only build, or when publishing only the plugin"
+        description: "Client version to publish (e.g. 1.3): step 1, which builds it for signing. Leave empty to only build, or when publishing only the plugin"
         required: false
         default: ""
       plugin_version:
@@ -35,16 +35,30 @@ on:
         type: boolean
         required: false
         default: false
+      build_run:
+        description: "Client step 2: id of the step 1 run to publish"
+        required: false
+        default: ""
+      sums_signature:
+        description: "Client step 2: contents of SHA256SUMS.sig (gh workflow run -F sums_signature=@SHA256SUMS.sig)"
+        required: false
+        default: ""
+
+env:
+  SM_URL: https://sm.alliedmods.net/smdrop/1.12/sourcemod-1.12.0-git7253-linux.tar.gz
+  SM_SHA256: 6bbcab989cda0ada83600d0dcb0f46affd16529b2b02ed2dba1b5baeaf02fdb4
 
 jobs:
   build:
+    # Client step 2 publishes what step 1 built.
+    if: github.event_name != 'workflow_dispatch' || inputs.sums_signature == ''
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
 
-      - uses: microsoft/setup-msbuild@v2
+      - uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2.0.0
 
       - name: Set version
         if: github.event_name == 'workflow_dispatch' && inputs.release_tag != '' && inputs.target != 'plugin'
@@ -54,7 +68,7 @@ jobs:
       - name: Build Release x64
         run: msbuild client/bhoptools.sln /p:Configuration=Release /p:Platform=x64 /m /v:minimal
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bhoptools-x64
           path: |
@@ -65,9 +79,10 @@ jobs:
           if-no-files-found: error
 
   build-linux:
+    if: github.event_name != 'workflow_dispatch' || inputs.sums_signature == ''
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set version
         if: github.event_name == 'workflow_dispatch' && inputs.release_tag != '' && inputs.target != 'plugin'
@@ -79,7 +94,10 @@ jobs:
       - name: Check glibc
         run: make -C client/linux check-glibc
 
-      - uses: actions/upload-artifact@v4
+      - name: Release signature tests
+        run: make -C client/tests release_sig_test && client/tests/release_sig_test
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bhoptools-linux-x64
           path: |
@@ -92,7 +110,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Work out the plugin version
         id: version
@@ -109,7 +127,10 @@ jobs:
       - name: Compile
         run: |
           set -e
-          curl -fsSL https://sm.alliedmods.net/smdrop/1.12/sourcemod-1.12.0-git7253-linux.tar.gz | tar xz
+          curl -fsSL "$SM_URL" -o sm.tar.gz
+          echo "$SM_SHA256  sm.tar.gz" | sha256sum -c -
+          tar xzf sm.tar.gz
+          rm sm.tar.gz
           SM=$PWD/addons/sourcemod/scripting
           mkdir out
           (cd plugin/addons/sourcemod/scripting && $SM/spcomp64 bhoptools.sp -i$SM/include -iinclude -o$GITHUB_WORKSPACE/out/bhoptools.smx)
@@ -120,26 +141,33 @@ jobs:
             cat out/manifest.json
           fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: bhoptools-plugin
           path: out/*
           if-no-files-found: error
 
-  # Run the workflow by hand with target client (or both) and a release_tag to publish the client.
+  # Publishing the client takes two runs. Step 1: run by hand with target client (or both) and a
+  # release_tag. It builds, writes SHA256SUMS and keeps the files as the "release" artifact.
+  # Step 2: sign SHA256SUMS with the release key and run again with build_run (step 1's run id)
+  # and sums_signature; that publishes step 1's files with SHA256SUMS and SHA256SUMS.sig.
+  # Clients refuse a release without a valid signature. See STAGING.md, "Promoting".
   release-client:
-    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != '' && inputs.target != 'plugin'
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != '' && inputs.target != 'plugin' && inputs.sums_signature == ''
     needs: [build, build-linux]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ inputs.release_tag }}
+      NOTES: ${{ inputs.notes }}
+      REQUIRED: ${{ inputs.required_update }}
+      PRERELEASE: ${{ inputs.prerelease }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: bhoptools-x64
           path: dist/windows
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: bhoptools-linux-x64
           path: dist/linux
@@ -148,44 +176,131 @@ jobs:
       - name: Package
         run: |
           set -e
-          cp "$(find dist/windows -name bhoptools.exe | head -1)" bhoptools.exe
+          [[ "$VERSION" =~ ^[0-9A-Za-z._-]+$ ]] || { echo "::error::release_tag should look like 1.13"; exit 1; }
+          mkdir -p release/out
+          cp "$(find dist/windows -name bhoptools.exe | head -1)" release/out/bhoptools.exe
           mkdir bhoptools-linux
           cp dist/linux/bhoptools.so dist/linux/bhoptools bhoptools-linux/
           chmod +x bhoptools-linux/bhoptools
-          tar czf bhoptools-linux.tar.gz bhoptools-linux
-          cp bhoptools-linux/* .
+          tar czf release/out/bhoptools-linux.tar.gz bhoptools-linux
+          cp bhoptools-linux/* release/out/
+          # What gets signed. The first line ties it to this version (the client checks it against
+          # the tag), so it can't be put on another release.
+          (cd release/out && { echo "# bhoptools release $VERSION"; sha256sum bhoptools.exe bhoptools-linux.tar.gz bhoptools.so bhoptools; } > SHA256SUMS)
+          cat release/out/SHA256SUMS
+          jq -n --arg sha "$GITHUB_SHA" --arg version "$VERSION" --argjson prerelease "$PRERELEASE" \
+            '{sha: $sha, version: $version, prerelease: $prerelease}' > release/meta.json
 
-      - uses: softprops/action-gh-release@v2
+      # staging.yml's promote writes the same body: the client shows what's above the ---.
+      - name: Release notes
+        run: |
+          set -e
+          {
+            if [ "$REQUIRED" = true ]; then echo '[required]'; else echo; fi
+            printf '%s\n' "$NOTES"
+            cat <<'EOF'
+
+          ---
+
+          Windows:
+          - Download `bhoptools.exe` and run it, it starts CS:S with `-insecure`.
+
+          Linux (64-bit CS:S):
+          - Download `bhoptools-linux.tar.gz` (or `bhoptools.so` and `bhoptools`) and extract it somewhere without spaces or `:` in the path.
+          - Run `./bhoptools` (`chmod +x` it first if you downloaded it on its own), and paste the launch options it prints into Steam.
+
+          Server plugin:
+          - Get `bhoptools.smx` from the [plugin release](https://github.com/ddyfad/bhoptools/releases/tag/plugin). It keeps itself up to date from there.
+
+          Both:
+          - Everything is switched on and off in Options → `Fixes`.
+          - `F5` autohop prediction (Windows), `F7` viewpunch remover, `F8` pingfix (client-side prediction of triggers, rngfix and the HUD speed).
+          - On servers running the [bhoptools plugin](https://github.com/ddyfad/bhoptools): checkpoints, noclip, restarts, shavit runspeed, landfix, easybhop, style key blocking, shavit-syncstyle autosync and momsurffix2 predicted, mpbhops_but_working doors, and the map state synced from the server.
+
+          `SHA256SUMS` lists every file, and `SHA256SUMS.sig` is its signature by a bhoptools release key (the keys are in `.github/release_signers`; check with `ssh-keygen -Y verify`).
+          EOF
+          } > release/body.md
+          cat release/body.md
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          tag_name: ${{ inputs.release_tag }}
-          target_commitish: ${{ github.sha }}
-          name: ${{ inputs.release_tag }}
-          prerelease: ${{ inputs.prerelease }}
-          files: |
-            bhoptools.exe
-            bhoptools-linux.tar.gz
-            bhoptools.so
-            bhoptools
-          body: |
-            ${{ inputs.required_update && '[required]' || '' }}
-            ${{ inputs.notes }}
+          name: release
+          path: release
+          if-no-files-found: error
 
-            ---
+      - name: What to do next
+        run: |
+          d="%USERPROFILE%\\bhoptools-release\\$VERSION"
+          {
+            echo "## $VERSION is built, not published"
+            echo
+            echo "Sign SHA256SUMS with the release key and run step 2 (STAGING.md), in cmd.exe:"
+            echo
+            echo '```'
+            echo "gh run download $GITHUB_RUN_ID -R $GITHUB_REPOSITORY -n release -D $d"
+            echo "type $d\\out\\SHA256SUMS"
+            echo "ssh-keygen -Y sign -n bhoptools-release -f %USERPROFILE%\\.ssh\\bhoptools-release $d\\out\\SHA256SUMS"
+            echo "gh workflow run build-windows.yml -R $GITHUB_REPOSITORY --ref $GITHUB_REF_NAME -f build_run=$GITHUB_RUN_ID -F sums_signature=@$d\\out\\SHA256SUMS.sig"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-            Windows:
-            - Download `bhoptools.exe` and run it, it starts CS:S with `-insecure`.
+  publish-client:
+    if: github.event_name == 'workflow_dispatch' && inputs.sums_signature != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # Outside the workspace, which the checkout below cleans.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release
+          path: ${{ runner.temp }}/release
+          run-id: ${{ inputs.build_run }}
+          github-token: ${{ github.token }}
 
-            Linux (64-bit CS:S):
-            - Download `bhoptools-linux.tar.gz` (or `bhoptools.so` and `bhoptools`) and extract it somewhere without spaces or `:` in the path.
-            - Run `./bhoptools` (`chmod +x` it first if you downloaded it on its own), and paste the launch options it prints into Steam.
+      - name: Read what step 1 built
+        id: meta
+        env:
+          BUILD_RUN: ${{ inputs.build_run }}
+        run: |
+          set -e
+          [[ "$BUILD_RUN" =~ ^[0-9]+$ ]] || { echo "::error::with sums_signature, build_run should be the id of the step 1 run"; exit 1; }
+          sha=$(jq -r .sha "$RUNNER_TEMP/release/meta.json")
+          version=$(jq -r .version "$RUNNER_TEMP/release/meta.json")
+          [[ "$sha" =~ ^[0-9a-f]{40}$ && "$version" =~ ^[0-9A-Za-z._-]+$ ]] || { echo "::error::run $BUILD_RUN's meta.json is broken"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
-            Server plugin:
-            - Get `bhoptools.smx` from the [plugin release](https://github.com/ddyfad/bhoptools/releases/tag/plugin). It keeps itself up to date from there.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ steps.meta.outputs.sha }}
+          persist-credentials: false
 
-            Both:
-            - Everything is switched on and off in Options → `Fixes`.
-            - `F5` autohop prediction (Windows), `F7` viewpunch remover, `F8` pingfix (client-side prediction of triggers, rngfix and the HUD speed).
-            - On servers running the [bhoptools plugin](https://github.com/ddyfad/bhoptools): checkpoints, noclip, restarts, shavit runspeed, landfix, easybhop, style key blocking, shavit-syncstyle autosync and momsurffix2 predicted, mpbhops_but_working doors, and the map state synced from the server.
+      # The keys are the ones the commit being released pins.
+      - name: Check the signature
+        env:
+          SUMS_SIGNATURE: ${{ inputs.sums_signature }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: bash .github/check-release.sh "$RUNNER_TEMP/release/out" "$VERSION"
+
+      - name: Publish
+        env:
+          SHA: ${{ steps.meta.outputs.sha }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -e
+          if gh release view "$VERSION" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::there's already a release $VERSION"
+            exit 1
+          fi
+          pre=""
+          if [ "$(jq -r .prerelease "$RUNNER_TEMP/release/meta.json")" = true ]; then pre="--prerelease"; fi
+          cd "$RUNNER_TEMP/release/out"
+          gh release create "$VERSION" -R "$GITHUB_REPOSITORY" --target "$SHA" --title "$VERSION" --notes-file "$RUNNER_TEMP/release/body.md" $pre \
+            bhoptools.exe bhoptools-linux.tar.gz bhoptools.so bhoptools SHA256SUMS SHA256SUMS.sig
 
   # Run the workflow by hand with target plugin (or both) to publish the plugin. It goes to a single
   # pre-release tagged "plugin", which the client's updater ignores; the plugin reads manifest.json from it.
@@ -196,7 +311,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: bhoptools-plugin
           path: dist/plugin
@@ -206,7 +321,7 @@ jobs:
           set -e
           cp dist/plugin/bhoptools.smx dist/plugin/manifest.json "dist/plugin/bhoptools-${{ needs.build-plugin.outputs.version }}.smx" .
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: plugin
           target_commitish: ${{ github.sha }}

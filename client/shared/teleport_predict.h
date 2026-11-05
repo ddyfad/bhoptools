@@ -86,6 +86,8 @@ bool TeleportPredict_TraceDown(const float origin[3], float distance, bool ducke
 bool TeleportPredict_MoveTeleported(bool velocityOnly);
 // Call once the wrapped ProcessMovement has returned.
 void TeleportPredict_OnCheckpointSave(int cpIndex);
+// Drops the saved states `inUse` says no checkpoint refers to any more.
+void TeleportPredict_PruneCheckpoints(bool (*inUse)(int cpIndex));
 // Before or after OnCheckpointTeleport in the same command. `kz`: kzcheckpoints,
 // whose teleport keeps touches, events and names.
 void TeleportPredict_OnCheckpointLoad(int cpIndex, bool kz);

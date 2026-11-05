@@ -27,6 +27,8 @@
 #include "settings.h"
 #include "version.h"
 #include "update_json.h"
+#include "dev_update.h"
+#include "release_sig.h"
 #include "options_tab.h"
 #include "spectate.h"
 #include "singleletter_fix.h"
@@ -360,6 +362,14 @@ typedef int    (*curl_global_init_t)(long);
 #define CURLOPT_WRITEFUNCTION  20011
 #define CURLOPT_FAILONERROR    45
 #define CURLOPT_FOLLOWLOCATION 52
+#ifdef BHOPTOOLS_DEV
+typedef void*  (*curl_slist_append_t)(void*, const char*);
+typedef void   (*curl_slist_free_all_t)(void*);
+typedef int    (*curl_easy_getinfo_t)(void*, int, ...);
+#define CURLOPT_HTTPHEADER     10023
+#define CURLINFO_RESPONSE_CODE 0x200002
+#define CURLINFO_REDIRECT_URL  0x10001F
+#endif
 
 static size_t CurlWriteToFile(char* data, size_t size, size_t n, void* f)
 {
@@ -367,7 +377,14 @@ static size_t CurlWriteToFile(char* data, size_t size, size_t n, void* f)
 }
 
 // `err`, when given, holds at least 256 bytes and gets the reason on failure.
+#ifdef BHOPTOOLS_DEV
+// With `headers` (null-terminated) a redirect isn't followed: its target goes to `location` and
+// false is returned. Older libcurl sends a custom Authorization header on to the new host.
+static bool CurlDownload(const char* url, const char* path, char* err = nullptr,
+	const char* const* headers = nullptr, std::string* location = nullptr)
+#else
 static bool CurlDownload(const char* url, const char* path, char* err = nullptr)
+#endif
 {
 	void* h = ModuleHandle("libcurl-gnutls");
 	if (!h) {
@@ -378,6 +395,12 @@ static bool CurlDownload(const char* url, const char* path, char* err = nullptr)
 	auto setopt  = (curl_easy_setopt_t)dlsym(h, "curl_easy_setopt");
 	auto perform = (curl_easy_perform_t)dlsym(h, "curl_easy_perform");
 	auto cleanup = (curl_easy_cleanup_t)dlsym(h, "curl_easy_cleanup");
+#ifdef BHOPTOOLS_DEV
+	auto slistAppend  = (curl_slist_append_t)dlsym(h, "curl_slist_append");
+	auto slistFreeAll = (curl_slist_free_all_t)dlsym(h, "curl_slist_free_all");
+	auto getinfo      = (curl_easy_getinfo_t)dlsym(h, "curl_easy_getinfo");
+	if (!slistAppend || !slistFreeAll || !getinfo) { dlclose(h); return false; }
+#endif
 	dlclose(h);
 	if (!init || !setopt || !perform || !cleanup) return false;
 
@@ -404,10 +427,29 @@ static bool CurlDownload(const char* url, const char* path, char* err = nullptr)
 			err[0] = 0;
 			setopt(c, CURLOPT_ERRORBUFFER, err);
 		}
+#ifdef BHOPTOOLS_DEV
+		void* list = nullptr;
+		if (headers) {
+			for (const char* const* hd = headers; *hd; hd++) list = slistAppend(list, *hd);
+			setopt(c, CURLOPT_HTTPHEADER, list);
+			setopt(c, CURLOPT_FOLLOWLOCATION, 0L);
+		}
+#endif
 		const int rc = perform(c);
 		ok = rc == 0;
 		if (!ok && err && !err[0]) snprintf(err, 256, "curl error %d", rc);
+#ifdef BHOPTOOLS_DEV
+		long code = 0;
+		char* redirect = nullptr;
+		if (ok && headers && getinfo(c, CURLINFO_RESPONSE_CODE, &code) == 0 && code / 100 == 3) {
+			ok = false;
+			if (location && getinfo(c, CURLINFO_REDIRECT_URL, &redirect) == 0 && redirect) *location = redirect;
+		}
+#endif
 		cleanup(c);
+#ifdef BHOPTOOLS_DEV
+		if (list) slistFreeAll(list);
+#endif
 	}
 	fclose(f);
 	if (ok && rename(tmp, path) != 0) {
@@ -427,6 +469,143 @@ static void CurlGlobalInit()
 	if (global) global(CURL_GLOBAL_DEFAULT);
 	dlclose(h);
 }
+
+#ifdef BHOPTOOLS_DEV
+bool dev::Download(const std::string& url, bool asset, const std::string& file)
+{
+	const std::string token = Token();
+	if (token.empty()) return false;
+	const std::string auth = "Authorization: Bearer " + token;
+	const char* headers[] = {
+		auth.c_str(),
+		asset ? "Accept: application/octet-stream" : "Accept: application/vnd.github+json",
+		"X-GitHub-Api-Version: 2022-11-28",
+		nullptr,
+	};
+	std::string location;
+	if (CurlDownload(url.c_str(), file.c_str(), nullptr, headers, &location)) return true;
+	return asset && !location.empty() && CurlDownload(location.c_str(), file.c_str());
+}
+
+// Downloads an ELF file and checks it against the size and digest the API listed; removed if it
+// doesn't match.
+static bool DevDownloadElf(const dev::Asset& asset, const char* path, char* err)
+{
+	if (!dev::Download(asset.url, true, path)) {
+		snprintf(err, 256, "the download failed (check the token in %s)", dev::TokenPath().c_str());
+		return false;
+	}
+	const std::string data = dev::ReadAll(path);
+	std::string why;
+	if (data.size() < 4 || memcmp(data.data(), "\x7f" "ELF", 4) != 0)
+		snprintf(err, 256, "the download isn't an ELF file");
+	else if (!dev::CheckAsset(asset, data, why))
+		snprintf(err, 256, "%s", why.c_str());
+	else {
+		if (asset.sha256.empty()) CoreLog("dev: the release lists no sha256 for %s, only its size was checked", path);
+		return true;
+	}
+	unlink(path);
+	return false;
+}
+
+// Puts `tag`'s .so next to ours as .so.new, which the constructor installs on the next start,
+// and replaces the launcher. `json` has the release.
+static bool DevInstall(const std::string& json, const std::string& tag, char* err)
+{
+	const std::vector<dev::Build> builds = dev::Builds(json);
+	const dev::Build* b = dev::Find(builds, tag);
+	dev::Asset so;
+	if (!b || !dev::FindAsset(json, *b, "bhoptools-dev.so", so)) {
+		snprintf(err, 256, "%s has no bhoptools-dev.so", tag.c_str());
+		return false;
+	}
+	Dl_info info;
+	if (!dladdr((void*)&DevInstall, &info) || !info.dli_fname) {
+		snprintf(err, 256, "can't find our own .so");
+		return false;
+	}
+	// Downloaded aside and checked: the constructor installs whatever .so.new it finds.
+	char newSo[PATH_MAX + 8], download[PATH_MAX + 16];
+	snprintf(newSo, sizeof(newSo), "%s.new", info.dli_fname);
+	snprintf(download, sizeof(download), "%s.download", info.dli_fname);
+	if (!DevDownloadElf(so, download, err)) return false;
+	if (rename(download, newSo) != 0) {
+		snprintf(err, 256, "can't rename the download: %s", strerror(errno));
+		unlink(download);
+		return false;
+	}
+
+	// The launcher only prints launch options, so it's best effort.
+	dev::Asset launcherAsset;
+	char launcher[PATH_MAX + 32], newLauncher[PATH_MAX + 40];
+	snprintf(launcher, sizeof(launcher), "%s", info.dli_fname);
+	char* slash = strrchr(launcher, '/');
+	if (slash && dev::FindAsset(json, *b, "bhoptools-dev", launcherAsset)) {
+		strcpy(slash + 1, "bhoptools-dev");
+		snprintf(newLauncher, sizeof(newLauncher), "%s.new", launcher);
+		char launcherErr[256];
+		if (access(launcher, F_OK) == 0 && DevDownloadElf(launcherAsset, newLauncher, launcherErr)) {
+			chmod(newLauncher, 0755);
+			rename(newLauncher, launcher);
+		}
+	}
+	return true;
+}
+
+static void* DevInstallThread(void* arg)
+{
+	std::string* tag = static_cast<std::string*>(arg);
+	const std::string json = dev::FetchJson(DEV_API "/tags/" + *tag, "install.json");
+	char err[256];
+	if (dev::Builds(json).empty())
+		CoreLog("couldn't get %s: no such dev build (only the newest 30 are kept), or the token doesn't work", tag->c_str());
+	else if (!DevInstall(json, *tag, err))
+		CoreLog("installing %s failed: %s", tag->c_str(), err);
+	else {
+		dev::WriteState(dev::kHeldFile, *tag);
+		CoreLog("%s is installed the next time the game starts", tag->c_str());
+	}
+	delete tag;
+	return nullptr;
+}
+
+static void* DevBuildsThread(void*)
+{
+	dev::PrintBuilds();
+	return nullptr;
+}
+
+static void StartDetached(void* (*fn)(void*), void* arg)
+{
+	pthread_t th;
+	pthread_attr_t attr;
+	pthread_attr_init(&attr);
+	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+	pthread_create(&th, &attr, fn, arg);
+	pthread_attr_destroy(&attr);
+}
+
+static void Cmd_DevInstall(const CCommandX& c)
+{
+	const std::string tag = c.argc > 1 ? c.argv[1] : "";
+	if (tag == "latest") {
+		dev::WriteState(dev::kHeldFile, "");
+		CoreLog("the newest dev build is offered again from the next start");
+		return;
+	}
+	if (tag.compare(0, 4, "dev-") != 0) {
+		CoreLog("bhoptools_install dev-<n>, or latest to follow the newest again; bhoptools_builds lists them");
+		return;
+	}
+	if (dev::CheckToken()) StartDetached(DevInstallThread, new std::string(tag));
+}
+
+static void Cmd_DevBuilds(const CCommandX&)
+{
+	StartDetached(DevBuildsThread, nullptr);
+}
+#endif
 
 FILE* fastdl::OpenLumpChecksums()
 {
@@ -576,6 +755,9 @@ static void InstallCodeHooks()
 	RemoveFrametimeFloor();
 	glyphs::Install();
 	speedo::RegisterCommands();
+#ifdef BHOPTOOLS_DEV
+	dev::RegisterCommands(Cmd_DevInstall, Cmd_DevBuilds);
+#endif
 	tp::SetCheckpointPrinter(cp::PrintState);
 	singleletter::Install();
 	g_teleportPredictReady = tp::Init() && tp::Attach();
@@ -1031,14 +1213,30 @@ static int ShowSDLMessageBox(const char* message, const SDL_MessageBoxButtonData
 	return show(&data, &id) == 0 ? id : -1;
 }
 
-static bool DownloadElf(const char* url, const char* path, char* err)
+#ifndef BHOPTOOLS_DEV
+static std::string ReadAll(const char* path)
+{
+	std::string data;
+	if (FILE* f = fopen(path, "rb")) {
+		char chunk[4096];
+		size_t n;
+		while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0) data.append(chunk, n);
+		fclose(f);
+	}
+	return data;
+}
+
+// Downloads an ELF file and checks it's the one with sha256 `hash`; removed if it isn't.
+static bool DownloadElf(const char* url, const char* path, const std::string& hash, char* err)
 {
 	if (!CurlDownload(url, path, err)) return false;
-	char magic[4] = {};
-	FILE* f = fopen(path, "rb");
-	if (f) { if (fread(magic, 1, 4, f) != 4) magic[0] = 0; fclose(f); }
-	if (!memcmp(magic, "\x7f" "ELF", 4)) return true;
-	snprintf(err, 256, "the download isn't an ELF file");
+	const std::string data = ReadAll(path);
+	if (data.size() < 4 || memcmp(data.data(), "\x7f" "ELF", 4) != 0)
+		snprintf(err, 256, "the download isn't an ELF file");
+	else if (relsig::Sha256Hex(data) != hash)
+		snprintf(err, 256, "the download isn't the file its signed SHA256SUMS lists");
+	else
+		return true;
 	unlink(path);
 	return false;
 }
@@ -1050,31 +1248,44 @@ static void* UpdateThread(void*)
 	const char* home = getenv("HOME");
 	if (!home) return nullptr;
 	const char* xdg = getenv("XDG_CONFIG_HOME");
-	char dir[PATH_MAX], ignoreFile[PATH_MAX + 32], jsonFile[PATH_MAX + 32];
+	char dir[PATH_MAX], ignoreFile[PATH_MAX + 32], cache[PATH_MAX];
 	if (xdg && *xdg) snprintf(dir, sizeof(dir), "%s/bhoptools", xdg);
 	else snprintf(dir, sizeof(dir), "%s/.config/bhoptools", home);
 	snprintf(ignoreFile, sizeof(ignoreFile), "%s/no_update_check", dir);
 	const bool ignored = access(ignoreFile, F_OK) == 0;
 
-	snprintf(jsonFile, sizeof(jsonFile), "%s/.cache", home);
-	mkdir(jsonFile, 0755);
-	strcat(jsonFile, "/bhoptools");
-	mkdir(jsonFile, 0755);
-	strcat(jsonFile, "/release.json");
-	if (!CurlDownload("https://api.github.com/repos/ddyfad/bhoptools/releases?per_page=20", jsonFile))
+	snprintf(cache, sizeof(cache), "%s/.cache", home);
+	mkdir(cache, 0755);
+	snprintf(cache, sizeof(cache), "%s/.cache/bhoptools", home);
+	mkdir(cache, 0755);
+	const std::string jsonFile = std::string(cache) + "/release.json";
+	if (!CurlDownload("https://api.github.com/repos/ddyfad/bhoptools/releases?per_page=20", jsonFile.c_str()))
 		return nullptr;
-	std::string json;
-	if (FILE* f = fopen(jsonFile, "rb")) {
-		char chunk[4096];
-		size_t n;
-		while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0) json.append(chunk, n);
-		fclose(f);
-	}
-	unlink(jsonFile);
+	const std::string json = ReadAll(jsonFile.c_str());
+	unlink(jsonFile.c_str());
 	std::string changelog;
 	bool required = false;
 	const std::string tag = Changelog(json, APP_VERSION, changelog, &required);
 	if (tag.empty() || (ignored && !required)) return nullptr;
+
+	// Checked before asking, so nobody is offered a release that won't install. Required or not,
+	// nothing goes in without SHA256SUMS signed by a release key.
+	const std::string base = "https://github.com/ddyfad/bhoptools/releases/download/" + tag + "/";
+	const std::string sumsFile = std::string(cache) + "/SHA256SUMS", sigFile = sumsFile + ".sig";
+	const bool fetched = CurlDownload((base + "SHA256SUMS").c_str(), sumsFile.c_str())
+		&& CurlDownload((base + "SHA256SUMS.sig").c_str(), sigFile.c_str());
+	const std::string sums = ReadAll(sumsFile.c_str()), sig = ReadAll(sigFile.c_str());
+	unlink(sumsFile.c_str());
+	unlink(sigFile.c_str());
+	std::string soHash, launcherHash, why = "couldn't download its SHA256SUMS and SHA256SUMS.sig";
+	if (!fetched || !relsig::CheckSums(sums, sig, tag, "bhoptools.so", soHash, why)) {
+		CoreLog("not updating to %s: it couldn't be verified (%s)", tag.c_str(), why.c_str());
+		ShowSDLMessageBox((tag + " is out, but it couldn't be verified as signed by the bhoptools release key, so it won't be installed:\n\n"
+			+ why + "\n\nThe current version (" APP_VERSION ") is unchanged.").c_str(), nullptr, 0);
+		return nullptr;
+	}
+	// The launcher only prints launch options: if the release doesn't list it, it's left as it is.
+	const bool launcherListed = relsig::ParseSums(sums, tag, "bhoptools", launcherHash, why);
 
 	if (required) {
 		ShowSDLMessageBox(("A required update is being installed: " + tag + " (you have " APP_VERSION ").\n\nChangelog:\n\n" + changelog).c_str(), nullptr, 0);
@@ -1095,31 +1306,78 @@ static void* UpdateThread(void*)
 
 	Dl_info info;
 	if (!dladdr((void*)&UpdateThread, &info) || !info.dli_fname) return nullptr;
-	char soPath[PATH_MAX], newSo[PATH_MAX + 8], url[256];
+	// Downloaded aside and checked: the constructor installs whatever .so.new it finds.
+	char soPath[PATH_MAX], newSo[PATH_MAX + 8], download[PATH_MAX + 16], url[256];
 	snprintf(soPath, sizeof(soPath), "%s", info.dli_fname);
 	snprintf(newSo, sizeof(newSo), "%s.new", soPath);
-	snprintf(url, sizeof(url), "https://github.com/ddyfad/bhoptools/releases/download/%s/bhoptools.so", tag.c_str());
+	snprintf(download, sizeof(download), "%s.download", soPath);
+	snprintf(url, sizeof(url), "%sbhoptools.so", base.c_str());
 	char err[256];
-	if (!DownloadElf(url, newSo, err)) {
+	if (!DownloadElf(url, download, soHash, err)) {
+		CoreLog("updating to %s failed: %s", tag.c_str(), err);
 		ShowSDLMessageBox(("Update failed, the current version is unchanged.\n\n" + std::string(err)).c_str(), nullptr, 0);
 		return nullptr;
 	}
+	if (rename(download, newSo) != 0) {
+		unlink(download);
+		ShowSDLMessageBox(("Update failed, the current version is unchanged.\n\ncan't rename the download: " + std::string(strerror(errno))).c_str(), nullptr, 0);
+		return nullptr;
+	}
 
-	// The launcher only prints launch options, so it's best effort.
 	char launcher[PATH_MAX + 32], newLauncher[PATH_MAX + 40];
 	snprintf(launcher, sizeof(launcher), "%s", soPath);
 	char* slash = strrchr(launcher, '/');
-	if (slash) {
+	if (slash && launcherListed) {
 		strcpy(slash + 1, "bhoptools");
 		snprintf(newLauncher, sizeof(newLauncher), "%s.new", launcher);
-		snprintf(url, sizeof(url), "https://github.com/ddyfad/bhoptools/releases/download/%s/bhoptools", tag.c_str());
-		if (access(launcher, F_OK) == 0 && DownloadElf(url, newLauncher, err)) {
+		snprintf(url, sizeof(url), "%sbhoptools", base.c_str());
+		if (access(launcher, F_OK) == 0 && DownloadElf(url, newLauncher, launcherHash, err)) {
 			chmod(newLauncher, 0755);
 			rename(newLauncher, launcher);
 		}
 	}
 	_exit(42);
 }
+#else
+static void* UpdateThread(void*)
+{
+	if (!strcmp(APP_VERSION, "dev")) return nullptr;
+	if (dev::Token().empty()) {
+		CoreLog("no GitHub token, so no dev build updates: save a read-only token for ddyfad/bhoptools-staging in %s (STAGING.md says how)", dev::TokenPath().c_str());
+		return nullptr;
+	}
+	const std::string json = dev::FetchJson(DEV_API "?per_page=20", "release.json");
+	if (json.empty()) {
+		CoreLog("couldn't fetch the dev builds; check the token in %s", dev::TokenPath().c_str());
+		return nullptr;
+	}
+	std::string changelog;
+	const std::string tag = dev::Changelog(dev::Builds(json), changelog);
+	if (tag.empty()) return nullptr;
+	if (dev::Held()) {
+		CoreLog("%s is out; staying on the build bhoptools_install put in (bhoptools_install latest to update)", tag.c_str());
+		return nullptr;
+	}
+	const std::string ignoreFile = settings::Dir() + "/no_update_check";
+	if (access(ignoreFile.c_str(), F_OK) == 0) return nullptr;
+
+	const SDL_MessageBoxButtonData buttons[] = {
+		{ 1, 0, "Update" },
+		{ 2, 1, "Ignore" },
+		{ 0, 2, "Ignore forever" },
+	};
+	const int answer = ShowSDLMessageBox((tag + " is out, you have " APP_VERSION ".\n\nChangelog:\n\n" + changelog).c_str(), buttons, 3);
+	if (answer == 2) dev::WriteState("no_update_check", "1");
+	if (answer != 0) return nullptr;
+
+	char err[256];
+	if (!DevInstall(json, tag, err)) {
+		ShowSDLMessageBox(("Update failed, the current version is unchanged.\n\n" + std::string(err)).c_str(), nullptr, 0);
+		return nullptr;
+	}
+	_exit(42);
+}
+#endif
 
 // The launch goes through bash and reaper helpers; only the game process gets the installer.
 static bool is_game_process()

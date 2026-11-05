@@ -39,16 +39,23 @@ const Field kFields[] = {
 
 }
 
+// bhoptools-dev has a folder of its own, so it never shares settings or update state with bhoptools.
+#ifdef BHOPTOOLS_DEV
+#define SETTINGS_DIR_NAME "bhoptools-dev"
+#else
+#define SETTINGS_DIR_NAME "bhoptools"
+#endif
+
 std::string Dir()
 {
 #ifdef _WIN32
 	const char* base = getenv("APPDATA");
-	return base ? std::string(base) + "\\bhoptools" : std::string();
+	return base ? std::string(base) + "\\" SETTINGS_DIR_NAME : std::string();
 #else
 	const char* xdg = getenv("XDG_CONFIG_HOME");
 	const char* home = getenv("HOME");
-	if (xdg && *xdg) return std::string(xdg) + "/bhoptools";
-	return home ? std::string(home) + "/.config/bhoptools" : std::string();
+	if (xdg && *xdg) return std::string(xdg) + "/" SETTINGS_DIR_NAME;
+	return home ? std::string(home) + "/.config/" SETTINGS_DIR_NAME : std::string();
 #endif
 }
 
