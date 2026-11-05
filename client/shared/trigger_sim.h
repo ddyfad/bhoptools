@@ -1843,6 +1843,16 @@ static void PredGatherCandidates(PredRuntime& rt, const float feet[3], const flo
 	std::sort(out.begin(), out.end());
 }
 
+// Where landfix.sp touches boosters from while a lift lasts: the player's hull traced down by the lift.
+static void PredSjUnlifted(const PredRuntime& rt, const float origin[3], const float mins[3], const float maxs[3], float out[3])
+{
+	const float lift = rt.world.landfixLift;
+	if (!rt.landfixUnlift || !rt.landfixUnlift(origin, lift, mins, maxs, out)) {
+		memcpy(out, origin, 3 * sizeof(float));
+		out[2] -= lift;
+	}
+}
+
 // Like PhysicsTouchTriggers, every trigger is found at the final origin before any
 // is touched, so a teleport partway through doesn't change what the rest see.
 static void PredRunTouch(PredRuntime& rt, PredPlayerIO& io)
@@ -1868,10 +1878,7 @@ static void PredRunTouch(PredRuntime& rt, PredPlayerIO& io)
 			const bool sj = e.sjBooster && w.landfixLift != 0.0f;
 			if (sj && !haveUnlifted) {
 				haveUnlifted = true;
-				if (!rt.landfixUnlift || !rt.landfixUnlift(queryOrigin, w.landfixLift, io.mins, io.maxs, unlifted)) {
-					memcpy(unlifted, queryOrigin, sizeof(unlifted));
-					unlifted[2] -= w.landfixLift;
-				}
+				PredSjUnlifted(rt, queryOrigin, io.mins, io.maxs, unlifted);
 			}
 			const bool overlap = !st.disabled && (sj
 				? PredBoxInModel(map, e.modelIndex, e.xf, unlifted, io.mins, io.maxs, -1)

@@ -37,6 +37,7 @@ enum RngFixBits {
 	RNG_FIX_STAIRS       = 1 << 6,
 	RNG_FIX_TELEHOP      = 1 << 7,
 	RNG_LANDED           = 1 << 8,
+	RNG_SJ_BOOSTER_SKIP  = 1 << 9, // the trigger jump fix's touch of a booster, refused by landfix.sp
 };
 
 struct RngEnv {
@@ -576,6 +577,17 @@ static bool RngDoTriggerjumpFix(RngRuntime& r, PredRuntime* rt, PredPlayerIO& io
 		const PredEntState& st = rt->world.ents[(size_t)i];
 		// g_bTouchingTrigger: MarkEntitiesAsTouching would Touch again, so skip live links.
 		if (st.linked || st.removed) continue;
+		// landfix.sp detours MarkEntitiesAsTouching, so while a lift lasts a booster is touched only from
+		// the unlifted position, with the player's own hull.
+		const PredSimEnt& e = rt->map->sim[(size_t)i];
+		if (e.sjBooster && rt->world.landfixLift != 0.0f) {
+			float unlifted[3];
+			PredSjUnlifted(*rt, io.origin, io.mins, io.maxs, unlifted);
+			if (!PredBoxInModel(*rt->map, e.modelIndex, e.xf, unlifted, io.mins, io.maxs, -1)) {
+				r.fixes |= RNG_SJ_BOOSTER_SKIP;
+				continue;
+			}
+		}
 		PredLinkAndTouch(*rt, i);
 		didSomething = true;
 	}

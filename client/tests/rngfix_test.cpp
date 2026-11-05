@@ -532,6 +532,32 @@ static void TestTriggerjumpTelehop()
 		CHECK(f.rt.teleports == tp0);
 		CHECK(!f.rt.world.ents[0].linked);
 	}
+	// A SourceJump landfix booster while a lift lasts: landfix.sp's MarkEntitiesAsTouching detour lets the
+	// fix touch it only from the unlifted position. Landed 1.5 above the floor, a lift of 0.2 leaves the feet
+	// over the 1-unit slab; 1.5 puts them in it.
+	{
+		Fixture f;
+		f.map->sim[0].sjBooster = true;
+		Player p;
+		RunTick(f, p, 99, Input(), NoMove);
+		f.rt.world.landfixLift = 0.2f;
+		const int tp0 = f.rt.teleports;
+		TriggerjumpScenario(f, p, 100);
+		CHECK(!(f.rng.fixes & RNG_FIX_TRIGGERJUMP) && (f.rng.fixes & RNG_SJ_BOOSTER_SKIP));
+		CHECK(f.rt.teleports == tp0 && !f.rt.world.ents[0].linked);
+	}
+	{
+		Fixture f;
+		f.map->sim[0].sjBooster = true;
+		Player p;
+		RunTick(f, p, 99, Input(), NoMove);
+		f.rt.world.landfixLift = 1.5f;
+		const int tp0 = f.rt.teleports;
+		TriggerjumpScenario(f, p, 100);
+		// landfix's own pass already touched it, before PostThink.
+		CHECK(!(f.rng.fixes & (RNG_FIX_TRIGGERJUMP | RNG_SJ_BOOSTER_SKIP)));
+		CHECK(f.rt.teleports == tp0 + 1);
+	}
 	// No trigger_sim: trigger jump can't run, the rest still does.
 	{
 		Fixture f;

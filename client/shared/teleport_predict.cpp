@@ -1356,6 +1356,8 @@ void Hooked_ProcessMovement(void* thisptr, void* pPlayer, void* pMove)
         g_moveTypeOffset > 0 ? *reinterpret_cast<const uint8_t*>(pl + g_moveTypeOffset) : -1);
     if (triggers) PredPostMove(g_rt, io);
     if (rng) RngPredictEndTick(*g_rngp, io, rt);
+    if (rng && firstRun && (g_rngp->rng.fixes & RNG_SJ_BOOSTER_SKIP))
+        PredLog("rngfix: cmd %d trigger jump skipped a booster at z %.3f, landfix lift %.3f", PredSnapshotKey(io), io.origin[2], g_rt.world.landfixLift);
     g_moveTeleported = g_rt.teleports != teleports || g_rt.zoneTeleports != zoneTeleports;
     // rngfix's stair, incline and telehop fixes set the velocity with TeleportEntity.
     g_moveVelocityTeleported = rng && (g_rngp->rng.fixes & (RNG_FIX_STAIRS | RNG_FIX_INCLINE | RNG_FIX_TELEHOP));
