@@ -12,7 +12,8 @@ namespace relsig {
 static const char* const kReleaseKeys[] = {
 	// The owner's YubiKey (FIDO2, made with -O application=ssh:bhoptools-release -O verify-required).
 	"sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIO5VVrqS8SoOXuUdbUgw3pGQlXmAt2EFaS7sSQr2k4CDAAAAFXNzaDpiaG9wdG9vbHMtcmVsZWFzZQ== bhoptools-release",
-	// BACKUP KEY: put its public key line here (ssh-ed25519 or sk-ssh-ed25519@openssh.com).
+	// Temporary software backup (passphrase-protected, kept offline); replace with the backup YubiKey's key.
+	"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAbUi/sEB4HW1rXUrQ78ugg4MIbsvTbTI4dTnlN8UflB bhoptools-release-backup",
 };
 
 namespace {
