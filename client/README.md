@@ -72,7 +72,7 @@ Windows and Linux
 * Download the latest release from the [Releases](../../releases) page.
 * Windows: run `bhoptools.exe`. It starts the game with `-insecure` for you.
 * Linux: put `bhoptools.so` and `bhoptools` somewhere without spaces or `:` in the path, run `./bhoptools` and paste the launch options it prints.
-* Updates: on start it checks for a newer release and offers it, with the notes of every release since yours.
+* Updates: on start it checks for a newer release and offers it, with the notes of every release since yours. A release is only installed when its `SHA256SUMS` is signed by the bhoptools release key and lists the file downloaded (the first signed release reaches older versions without that check).
   * Windows: Yes replaces the exe and starts the new one, No asks again next time, Cancel stops checking.
   * Linux: the popup comes up with the game window (Update, Ignore, Ignore forever). Update downloads the new `.so` next to the old one and restarts the game into it. The files are swapped on the next launch from Steam.
   * To check again after turning it off, delete `no_update_check` from the settings folder below.
@@ -100,3 +100,8 @@ Windows and Linux
 - [bhopbhopbhop](https://github.com/bhopbhopbhop/RawInput2BunnyhopAPE-lagfix): lagfix, the first client-side trigger prediction and predicted HUD speed.
 - [dowoge](https://github.com/dowoge/RawInput2BunnyhopAPE/tree/linux): the Linux port.
 - [zas](https://github.com/zasbu/zastools): zastools, where the Linux chat glyph fallback comes from.
+
+### Third-party code
+- [Monocypher](https://monocypher.org/) 4.0.3 (`shared/vendor/monocypher`), BSD-2-Clause or CC0-1.0 (`LICENCE.md` there): ed25519 and SHA-512 for checking signed updates.
+- [Brad Conte's crypto-algorithms](https://github.com/B-Con/crypto-algorithms) SHA-256 (`shared/vendor/sha256`), public domain.
+- [Microsoft Detours](https://github.com/microsoft/Detours) (`windows/Detours`, submodule), MIT.

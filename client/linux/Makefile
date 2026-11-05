@@ -32,7 +32,9 @@ all: $(SO_NAME) $(EXE_NAME)
 SRCS := preload.cpp glibc_compat.cpp chat_glyphs.cpp singleletter_fix.cpp \
         ../shared/teleport_predict.cpp ../shared/checkpoint_predict.cpp \
         ../shared/speedo.cpp ../shared/jumpstats.cpp ../shared/engine_trace.cpp ../shared/momsurffix_predict.cpp \
-        ../shared/settings.cpp ../shared/options_tab.cpp ../shared/spectate.cpp ../shared/download_progress.cpp ../shared/fastdl.cpp
+        ../shared/settings.cpp ../shared/options_tab.cpp ../shared/spectate.cpp ../shared/download_progress.cpp ../shared/fastdl.cpp \
+        ../shared/release_sig.cpp ../shared/vendor/monocypher/monocypher.c ../shared/vendor/monocypher/monocypher-ed25519.c \
+        ../shared/vendor/sha256/sha256.c
 
 $(SO_NAME): $(SRCS) $(wildcard *.h ../shared/*.h) preload.ver
 	$(CXX) $(CXXFLAGS) -I. -I../shared -fPIC $(SRCS) -o $@ $(SO_FLAGS)
