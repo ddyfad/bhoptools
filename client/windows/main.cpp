@@ -29,6 +29,7 @@
 #include "spectate.h"
 #include "game_layout.h"
 #include "pollfix.h"
+#include "rawprecise.h"
 
 // TaskDialog needs common controls v6.
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
@@ -122,6 +123,12 @@ bool RawPathActive()
 // WM_INPUT messages it no longer retrieves.
 int DrainRawInputForPump()
 {
+	if (rawprecise::On())
+	{
+		const int reports = rawprecise::FlushButtons();
+		pollfix::CountRaw(reports);
+		return reports + DrainRawInput();
+	}
 	const int n = DrainRawInput();
 	if (n && Plat_FloatTime)
 		m_mouseSampleTime = Plat_FloatTime();
@@ -130,6 +137,16 @@ int DrainRawInputForPump()
 
 bool GetRawMouseAccumulators(int& accumX, int& accumY, double frame_split)
 {
+	if (rawprecise::On())
+	{
+		rawprecise::Take(accumX, accumY, frame_split);
+		// Whatever reached the game's window before the mouse moved to our thread.
+		accumX += *m_mouseRawAccumX;
+		accumY += *m_mouseRawAccumY;
+		*m_mouseRawAccumX = *m_mouseRawAccumY = 0;
+		return *m_bRawInputSupported;
+	}
+
 	if (frame_split != 0.0 && DrainRawInput())
 		m_mouseSampleTime = Plat_FloatTime();
 
@@ -263,6 +280,8 @@ LRESULT __fastcall Hooked_WindowProc(void* thisptr, HWND hwnd, UINT uMsg, WPARAM
 {
 	if (pollfix::OnWindowMessage(hwnd, uMsg))
 		return 0;
+	if (rawprecise::OnWindowMessage(hwnd, uMsg))
+		return 0;
 	// Does what CInputSystem::WindowProc would (add lLastX/Y to its accumulators), then takes the
 	// rest of the queue in one go. DefWindowProc does the WM_INPUT cleanup the docs ask for.
 	if (uMsg == WM_INPUT && g_rawInput2Ready && *m_bRawInputSupported)
@@ -281,6 +300,8 @@ LRESULT __fastcall Hooked_WindowProc(void* thisptr, HWND hwnd, UINT uMsg, WPARAM
 	dev::RegisterCommands(Cmd_DevInstall, Cmd_DevBuilds);
 #endif
 	pollfix::RegisterCommands();
+	if (g_rawInput2Ready)
+		rawprecise::RegisterCommands();
 	// GameUI's vtables are patched on the game thread; a failed look is a few ms of scanning, so once a second.
 	static bool optionsDone = false;
 	static ULONGLONG optionsNext = 0;
@@ -330,6 +351,7 @@ void __fastcall Hooked_IN_SetSampleTime(void* thisptr, float frametime)
 	oIn_SetSampleTime(thisptr, frametime);
 	js::OnFrame();
 	pollfix::OnFrame();
+	rawprecise::Update(RawPathActive(), DrainRawInput);
 }
 
 void __fastcall Hooked_CHostState_OnClientConnected(void* thisptr)
@@ -841,6 +863,8 @@ DWORD InjectionEntryPoint(DWORD processID)
 	CHud_FindElement = (CHud_FindElementFn)FindPatternLogged("client.dll", "CHud::FindElement", "48 89 5C 24 ? 48 89 6C 24 ? 48 89 74 24 ? 57 48 83 EC 20 33 DB 48 8B EA 48 8B F9 39 59");
 	CBaseHudChat_ChatPrintf = (CBaseHudChat_ChatPrintfFn)FindPatternLogged("client.dll", "CBaseHudChat::ChatPrintf", "4C 89 4C 24 ? 48 89 4C 24 ? 55 53");
 	settings::Load();
+	if (g_rawInput2Ready)
+		rawprecise::Init(Plat_FloatTime);
 	BYTE nopBuffer[6] = { 0x90,0x90,0x90,0x90,0x90,0x90 };
 	BYTE jumpPredOriginalBytes[6];
 	// The `test byte ptr [reg+off], 2` of the "don't pogo stick" check.
@@ -960,6 +984,7 @@ DWORD InjectionEntryPoint(DWORD processID)
 		DetourAttach(&(PVOID&)oGetAccumulatedMouseDeltasAndResetAccumulators, Hooked_GetAccumulatedMouseDeltasAndResetAccumulators);
 		DetourAttach(&(PVOID&)oControllerMove, Hooked_ControllerMove);
 		DetourAttach(&(PVOID&)oIn_SetSampleTime, Hooked_IN_SetSampleTime);
+		rawprecise::Attach();
 	}
 	pollfix::Attach();
 	if (LONG err = DetourTransactionCommit())
@@ -1026,7 +1051,9 @@ DWORD InjectionEntryPoint(DWORD processID)
 		VirtualProtect(jumpPred, sizeof(jumpPredOriginalBytes), jumpPredOriginalProtect, &jumpPredOriginalProtect);
 	}
 
-	// Needs Hooked_WindowProc still attached.
+	// Need Hooked_WindowProc still attached. rawprecise first, so no-legacy is taken off the game's registration.
+	if (g_rawInput2Ready)
+		rawprecise::Shutdown();
 	pollfix::Shutdown();
 	DetourTransactionBegin();
 	DetourUpdateThread(GetCurrentThread());
@@ -1066,6 +1093,7 @@ DWORD InjectionEntryPoint(DWORD processID)
 		DetourDetach(&(PVOID&)oGetAccumulatedMouseDeltasAndResetAccumulators, Hooked_GetAccumulatedMouseDeltasAndResetAccumulators);
 		DetourDetach(&(PVOID&)oControllerMove, Hooked_ControllerMove);
 		DetourDetach(&(PVOID&)oIn_SetSampleTime, Hooked_IN_SetSampleTime);
+		rawprecise::Detach();
 	}
 	pollfix::Detach();
 	DetourTransactionCommit();

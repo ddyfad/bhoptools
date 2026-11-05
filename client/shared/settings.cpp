@@ -36,6 +36,7 @@ const Field kFields[] = {
 	{ "jsframe",   &Settings::jsframe },
 	{ "chatglyphs", &Settings::chatglyphs },
 	{ "pollfix",   &Settings::pollfix },
+	{ "rawprecise", &Settings::rawprecise },
 };
 
 }

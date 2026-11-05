@@ -27,6 +27,7 @@
     <ClCompile Include="Detours\src\modules.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="pollfix.cpp" />
+    <ClCompile Include="rawprecise.cpp" />
     <ClCompile Include="..\shared\teleport_predict.cpp" />
     <ClCompile Include="..\shared\speedo.cpp" />
     <ClCompile Include="..\shared\jumpstats.cpp" />
@@ -56,6 +57,7 @@
   <ItemGroup>
     <ClInclude Include="Detours\src\detours.h" />
     <ClInclude Include="utils.h" />
+    <ClInclude Include="rawprecise.h" />
     <ClInclude Include="..\shared\release_sig.h" />
     <ClInclude Include="..\shared\vendor\monocypher\monocypher.h" />
     <ClInclude Include="..\shared\vendor\monocypher\monocypher-ed25519.h" />

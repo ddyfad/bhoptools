@@ -59,6 +59,7 @@ const Row kRows[] = {
 	{ &Settings::updates,   nullptr,            L"ask about updates when starting" },
 #ifdef _WIN32
 	{ &Settings::pollfix,   nullptr,            L"high polling rate fix (4-8 kHz mice: no fps loss while moving the mouse)" },
+	{ &Settings::rawprecise, nullptr,           L"rawinput2 precise (each tick gets the mouse movement from its own slice of time)" },
 #endif
 };
 const int kRowCount = sizeof(kRows) / sizeof(kRows[0]);

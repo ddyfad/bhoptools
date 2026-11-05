@@ -15,6 +15,7 @@ struct Settings {
 	bool jsframe   = false;  // client-drawn compact trainers redrawn every frame instead of every tick
 	bool chatglyphs = true;  // Linux only
 	bool pollfix   = true;   // Windows only: no legacy mouse messages in game, the message pump filtered in menus
+	bool rawprecise = false; // Windows only: mouse reports timestamped on their own thread, each tick takes its own
 	bool updates   = true;   // ask about updates when starting; "Don't ask again" in the launcher turns it off (no_update_check)
 };
 
