@@ -197,13 +197,14 @@ BOOL Pump(PeekMessageFn fn, LPMSG msg, HWND hwnd, UINT flags)
 		g_pumpStart = now;
 		g_s.pumps++;
 		g_tookMouseMove = g_tookNcMouseMove = g_tookUnfiltered = false;
-		UpdateNoLegacy();
-		if (g_noLegacyOn) g_s.noLegacyPumps++;
 		g_filtering = g_drain && settings::Get().pollfix && GetForegroundWindow() == g_gameWindow;
 		if (g_filtering) {
 			g_s.filtered++;
 			g_drain();
 		}
+		// After the drain: what's queued arrived under the old registration and is handled by it.
+		UpdateNoLegacy();
+		if (g_noLegacyOn) g_s.noLegacyPumps++;
 	}
 	BOOL r;
 	if (!g_filtering) {
