@@ -24,8 +24,11 @@ namespace {
 
 // bgs-jumpstats' settings indexes and bits (jumpstat/settings.sp)
 enum { GainReallyBad, GainBad, GainMeh, GainGood, GainReallyGood, Bools, Usage, Positions_X, Positions_Y,
-	Positions2_X, Positions2_Y, TrainerSpeed, JhudCutOff, JhudSpeedColorsJump, JhudHidden, Bools2, kSettings };
-enum { HudJhud, HudTrainer, HudOffset, HudSpeedometer, HudFjt, HudShowKeys, HudPreStrafeTrainer, HudSlowTicks };
+	Positions2_X, Positions2_Y, TrainerSpeed, JhudCutOff, JhudSpeedColorsJump, JhudHidden, Bools2,
+	// bhoptools_jsset sends these two after the move cvars
+	Positions3_X, Positions3_Y, kSettings };
+const int kSentSettings = Bools2 + 1;
+enum { HudJhud, HudTrainer, HudOffset, HudSpeedometer, HudFjt, HudShowKeys, HudPreStrafeTrainer, HudSlowTicks, HudShowYaws };
 enum { Trainer_Slow, Trainer_Medium, Trainer_Fast };
 
 const uint32_t JHUD_ENABLED = 1u << 0, JHUD_JSS = 1u << 1, JHUD_SYNC = 1u << 2, JHUD_GMOD_JSS = 1u << 3,
@@ -87,6 +90,8 @@ bool g_on;
 int  g_cvars;
 int  g_channels[6];
 int  g_set[kSettings];
+// A plugin that sends Positions3 has ShowYaws at its own position and group; an older one draws it on the speedometer's.
+bool g_ownShowYaws;
 std::string g_prefix, g_text, g_variable;
 std::string g_colorsIn;
 int  g_colorsLen = -1;
@@ -174,7 +179,8 @@ int TickRate() { return RoundToFloor(1.0f / TickInterval()); }
 
 float HudCoord(int hud, int dim)
 {
-	const int index = hud / 4 == 0 ? (dim ? Positions_Y : Positions_X) : (dim ? Positions2_Y : Positions2_X);
+	const int index = hud / 4 == 0 ? (dim ? Positions_Y : Positions_X) : hud / 4 == 1 ? (dim ? Positions2_Y : Positions2_X)
+		: (dim ? Positions3_Y : Positions3_X);
 	const int v = (int)(((uint32_t)g_set[index] >> ((hud % 4) * 8)) & 255);
 	return v <= 0 ? -1.0f : (float)v / 255.0f;
 }
@@ -391,17 +397,25 @@ int PreTrainerGroup()
 	return !Has(TRAINER_ENABLED) ? 0 : !Has(JHUD_ENABLED) ? 1 : !Has(OFFSETS_ENABLED) ? 2 : !Has(SHOWKEYS_ENABLED) ? 3 : !Has(SPEEDOMETER_ENABLED) ? 4 : 5;
 }
 
-// offsets.sp's SlowTicks_Group: a group none of the HUDs drawn in the air is on, one the prestrafe trainer doesn't
-// use if there is one, else the prestrafe trainer's, which only draws on the ground. Everything we draw comes as
-// sent, so nothing has been moved.
-int SlowTicksGroup()
+// pretrainer.sp's Js_FreeGroups: ShowYaws, then the slow ticks, each on a group none of the HUDs drawn in the air is
+// on, one the prestrafe trainer doesn't use if there is one, else the prestrafe trainer's, which only draws on the
+// ground. Everything we draw comes as sent, so nothing has been moved. An older plugin puts ShowYaws on the
+// speedometer's group 4.
+void FreeGroups(int& yaws, int& slow)
 {
-	const bool air[6] = { Has(TRAINER_ENABLED), Has(JHUD_ENABLED), Has(OFFSETS_ENABLED), Has(SHOWKEYS_ENABLED),
-		Has(SPEEDOMETER_ENABLED | SHOWYAWS_ENABLED), false };
+	bool air[6] = { Has(TRAINER_ENABLED), Has(JHUD_ENABLED), Has(OFFSETS_ENABLED), Has(SHOWKEYS_ENABLED),
+		Has(SPEEDOMETER_ENABLED) || (!g_ownShowYaws && Has(SHOWYAWS_ENABLED)), false };
 	const int ground = PreTrainerGroup();
-	for (int i = 0; i < 6; ++i)
-		if (!air[i] && i != ground) return i;
-	return ground;
+	auto pick = [&]() {
+		for (int i = 0; i < 6; ++i)
+			if (!air[i] && i != ground) return i;
+		for (int i = 0; i < 6; ++i)
+			if (!air[i]) return i;
+		return ground;
+	};
+	yaws = g_ownShowYaws ? pick() : 4;
+	if (Has(SHOWYAWS_ENABLED)) air[yaws] = true;
+	slow = pick();
 }
 
 void Offset(int offset, bool overlap, bool nopress)
@@ -416,7 +430,9 @@ void Offset(int offset, bool overlap, bool nopress)
 	if (mode > 0) {
 		const int count = slow[mode - 1];
 		const int idx = count <= 0 ? GainReallyGood : count == 1 ? GainGood : count == 2 ? GainMeh : count == 3 ? GainBad : GainReallyBad;
-		ShowHud(HudSlowTicks, Color(idx), 0.5f, SlowTicksGroup(), Fmt("%d under %d%%", count, mode * 25));
+		int yaws, group;
+		FreeGroups(yaws, group);
+		ShowHud(HudSlowTicks, Color(idx), 0.5f, group, Fmt("%d under %d%%", count, mode * 25));
 	}
 
 	if (!Cvar(JSCV_OFFSET)) return;
@@ -849,10 +865,11 @@ void Speedometer(const float velocity[3])
 	if (!enabled && !smallVelocity) return;
 	const bool comparison = g_hasComparison && Has(SPEEDOMETER_COMPARISON);
 	const std::string cmp = comparison ? Fmt(" (%s%.0f)", g_comparison >= 0.0f ? "+" : "", g_comparison) : "";
-	if (smallVelocity) CenterText(Fmt("%s%i", g_speedDirection < 0 ? "-" : "+", speed) + cmp);
+	if (smallVelocity) CenterText((speed == 0 ? std::string("0") : Fmt("%s%i", g_speedDirection < 0 ? "-" : "+", speed)) + cmp);
 	if (!enabled) return;
 
-	std::string m = speed < 10 ? Fmt("   %i", speed) : speed < 1000 ? Fmt(" %i", speed) : Fmt("%i", speed);
+	// at x = -1 the engine centres the whole string, so padding would push it off centre
+	std::string m = HudCoord(HudSpeedometer, 0) < 0.0f || speed >= 1000 ? Fmt("%i", speed) : speed < 10 ? Fmt("   %i", speed) : Fmt(" %i", speed);
 	if (Has(SPEEDOMETER_VELOCITY_DIFF)) m += delta > 0 ? Fmt(" (+%i)", delta) : Fmt(" (%i)", delta);
 	ShowHud(HudSpeedometer, Color(idx), 0.15f, 4, m + cmp);
 }
@@ -870,7 +887,9 @@ void ShowYaws(const float velocity[3], float viewYaw)
 	visual[21] = '\0';
 	// yawdiff.sp's first two checks always pass
 	const int idx = deltaYaw > 90 || deltaYaw < -90 ? GainReallyBad : GainMeh;
-	ShowHud(HudSpeedometer, Color(idx), 0.2f, 4, Fmt("Yaw \xCE\x94: %.1f\xC2\xB0\n[%s]", deltaYaw, visual));
+	int group, slow;
+	FreeGroups(group, slow);
+	ShowHud(g_ownShowYaws ? HudShowYaws : HudSpeedometer, Color(idx), 0.2f, group, Fmt("Yaw \xCE\x94: %.1f\xC2\xB0\n[%s]", deltaYaw, visual));
 }
 
 // showkeys.sp
@@ -1148,7 +1167,7 @@ void SetChat(int client, int sayText2)
 }
 
 // bhoptools_jsset <session> <on> <cvars> <channel groups 0-5> <settings 0-14 as %x> [setting 15, Bools2]
-// [sv_accelerate, sv_friction, sv_stopspeed bits]
+// [sv_accelerate, sv_friction, sv_stopspeed bits] [Positions3_X, Positions3_Y]
 void Cmd_Settings(const CCommandX& c)
 {
 	if (!OurSession(c, 3)) return;
@@ -1156,12 +1175,17 @@ void Cmd_Settings(const CCommandX& c)
 	if (!g_on || c.argc < 4 + 6 + Bools2) return;
 	g_cvars = atoi(c.argv[3]);
 	for (int i = 0; i < 6; ++i) g_channels[i] = atoi(c.argv[4 + i]);
-	for (int i = 0; i < kSettings; ++i) g_set[i] = 10 + i < c.argc ? (int)(uint32_t)strtoul(c.argv[10 + i], nullptr, 16) : 0;
-	g_haveMoveCvars = c.argc >= 10 + kSettings + 3;
+	auto hex = [&](int arg) { return arg < c.argc ? (int)(uint32_t)strtoul(c.argv[arg], nullptr, 16) : 0; };
+	for (int i = 0; i < kSentSettings; ++i) g_set[i] = hex(10 + i);
+	const int after = 10 + kSentSettings + 3;
+	g_ownShowYaws = c.argc >= after + 2;
+	g_set[Positions3_X] = hex(after);
+	g_set[Positions3_Y] = hex(after + 1);
+	g_haveMoveCvars = c.argc >= after;
 	if (!g_haveMoveCvars) return;
 	float* cvars[3] = { &g_accelerate, &g_friction, &g_stopspeed };
 	for (int i = 0; i < 3; ++i) {
-		const uint32_t bits = (uint32_t)strtoul(c.argv[10 + kSettings + i], nullptr, 16);
+		const uint32_t bits = (uint32_t)strtoul(c.argv[10 + kSentSettings + i], nullptr, 16);
 		memcpy(cvars[i], &bits, 4);
 	}
 }
