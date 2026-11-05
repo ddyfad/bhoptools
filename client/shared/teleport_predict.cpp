@@ -631,7 +631,7 @@ const int kConVar_Parent = 0x38;
 const int kConVar_Float  = 0x54;
 
 // The engine keeps pointers to these for the whole process.
-const int kCmdCount = 2;
+const int kCmdCount = 3;
 ConCommandX g_cmds[kCmdCount];
 bool g_registered = false;
 bool g_lateInit = false;
@@ -694,6 +694,17 @@ void PrintRngfix()
 void Cmd_Log(const CCommandX&)
 {
     CoreLog("bhoptools_log: %s", TeleportPredict_ToggleLog() ? "on, writing cstrike/bhoptools_log.txt" : "off");
+}
+
+bool g_shotLog;
+std::string g_shotLogName;
+bool g_shotLogPushed;
+int  g_shotLogState = -1;
+
+void Cmd_ShotLog(const CCommandX& c)
+{
+    g_shotLog = c.argc > 1 ? atoi(c.argv[1]) != 0 : !g_shotLog;
+    CoreLog("bhoptools_shotlog %d", g_shotLog ? 1 : 0);
 }
 
 // Game thread only: the engine walks the command list while it runs console commands.
@@ -852,13 +863,23 @@ bool  g_shotsWatched, g_shotsTried;
 
 void OnGameTrace(const etrace::RayX& ray, unsigned int mask, const etrace::GameTraceX& tr)
 {
-    if (!g_shotWindow || mask != kMaskShot || tr.fraction >= 1.0f || !tr.ent) return;
+    if (mask != kMaskShot) return;
+    if (!g_shotWindow) {
+        // ours should all be inside it; another player's shot drawn here shows up too
+        if (g_shotLog) CoreLog("shotlog: shot trace from %.1f %.1f %.1f outside our window", ray.start.x, ray.start.y, ray.start.z);
+        return;
+    }
     const float d[3] = { ray.start.x - g_shotEye[0], ray.start.y - g_shotEye[1], ray.start.z - g_shotEye[2] };
-    if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 16.0f) return;
-    // Not the world, nor a player in front of it.
-    const int index = etrace::EntityIndex(tr.ent);
-    if (index >= 0 && index <= 64) return;
-    const int button = PredButtonAt(g_rt, tr.endpos);
+    const float off = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    const bool hit = tr.fraction < 1.0f && tr.ent;
+    // Any hit on a button's bounds counts, the world too: nothing but the button can be there unless it isn't
+    // networked to us. A player in front of it is put right by the server's sync.
+    const int index = g_shotLog && hit ? etrace::EntityIndex(tr.ent) : -1;
+    const int button = hit && off <= 4.0f ? PredButtonAt(g_rt, tr.endpos) : -1;
+    if (g_shotLog)
+        CoreLog("shotlog: cmd %d trace from %.1f %.1f %.1f (%.1f off the eye) to %.1f %.1f %.1f, fraction %.3f, entity %d, button %d",
+            g_shotKey, ray.start.x, ray.start.y, ray.start.z, off, tr.endpos[0], tr.endpos[1], tr.endpos[2], tr.fraction, index,
+            button >= 0 ? g_rt.map->sim[button].hammerId : -1);
     if (button >= 0) PredNoteShot(g_rt, g_shotKey, button);
 }
 
@@ -1312,7 +1333,12 @@ void Hooked_ProcessMovement(void* thisptr, void* pPlayer, void* pMove)
 
     const RngSettings& rs = TeleportPredict_RngfixSettings();
     g_rt.rngfixTelehop = rs.known && rs.telehop;
+    const bool shotLog = g_shotLog && triggers && firstRun;
+    if (shotLog) g_shotLogName = g_rt.world.playerName;
     if (triggers) PredPreMove(g_rt, io);
+    if (shotLog && g_rt.world.playerName != g_shotLogName)
+        CoreLog("shotlog: cmd %d starts with targetname \"%s\" (was \"%s\")", PredSnapshotKey(io),
+            g_rt.world.playerName.c_str(), g_shotLogName.c_str());
     if (rng) RngPredictPreTick(*g_rngp, io, in, rt);
     g_mpbhopsJump.pl = g_rt.mpbhops ? pl : nullptr;
     g_mpbhopsJump.md = md;
@@ -1334,8 +1360,25 @@ void Hooked_ProcessMovement(void* thisptr, void* pPlayer, void* pMove)
     // rngfix's stair, incline and telehop fixes set the velocity with TeleportEntity.
     g_moveVelocityTeleported = rng && (g_rngp->rng.fixes & (RNG_FIX_STAIRS | RNG_FIX_INCLINE | RNG_FIX_TELEHOP));
 
+    if (shotLog) {
+        const bool pushed = g_rt.world.baseVelFlag;
+        if (pushed && !g_shotLogPushed)
+            CoreLog("shotlog: cmd %d push starts, basevelocity %.0f %.0f %.0f, targetname \"%s\"", PredSnapshotKey(io),
+                io.baseVelocity[0], io.baseVelocity[1], io.baseVelocity[2], g_rt.world.playerName.c_str());
+        g_shotLogPushed = pushed;
+    }
+
     if (triggers && firstRun) {
         g_shotWindow = g_rt.buttonShots && g_rt.eventQueueFix && io.solid && !g_rt.map->buttons.empty() && ShotsWatched();
+        if (g_shotLog) {
+            const int state = (g_rt.buttonShots ? 1 : 0) | (g_rt.eventQueueFix ? 2 : 0) | (!g_rt.map->buttons.empty() ? 4 : 0)
+                | (g_shotsWatched ? 8 : 0);
+            if (state != g_shotLogState)
+                CoreLog("shotlog: server says buttons %d, eventqueue %d; %d damage buttons on the map; traces %s",
+                    g_rt.buttonShots ? 1 : 0, g_rt.eventQueueFix ? 1 : 0, (int)g_rt.map->buttons.size(),
+                    g_shotsWatched ? "watched" : g_shotsTried ? "couldn't be hooked" : "not hooked yet (engine trace not validated)");
+            g_shotLogState = state;
+        }
         if (g_shotWindow) {
             g_shotKey = PredSnapshotKey(io);
             const float eyeZ = g_viewOffsetZ > 0 ? *reinterpret_cast<const float*>(pl + g_viewOffsetZ) : io.viewHeight;
@@ -1452,6 +1495,7 @@ void RegisterCommands()
     const struct { const char* name; const char* help; void (*fn)(const CCommandX&); } defs[kCmdCount] = {
         { "bhoptools_predict", "Client-side prediction of triggers, rngfix, checkpoints and HUD speed (0/1).", Cmd_Predict },
         { "bhoptools_log", "Start or stop writing debug info to cstrike/bhoptools_log.txt, to send with a bug report.", Cmd_Log },
+        { "bhoptools_shotlog", "Print predicted shots on damage-activated buttons, the targetname they give and the pushes that follow (0/1).", Cmd_ShotLog },
     };
     for (int i = 0; i < kCmdCount; ++i) {
         ConCommandX& c = g_cmds[i];
@@ -1780,7 +1824,9 @@ int TeleportPredict_SyncEntity(int cmd, int hammerId, int flags, float value, in
 
 int TeleportPredict_SyncPlayer(int cmd, float gravity, bool baseVelFlag, const char* name, const char* cls)
 {
-    return PredSyncPlayer(tp::g_rt, cmd, gravity, baseVelFlag, name, cls);
+    const int fixed = PredSyncPlayer(tp::g_rt, cmd, gravity, baseVelFlag, name, cls);
+    if (tp::g_shotLog) CoreLog("shotlog: server says after cmd %d: targetname \"%s\" (%d fields differed)", cmd, name, fixed);
+    return fixed;
 }
 
 namespace {
