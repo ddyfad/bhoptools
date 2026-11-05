@@ -1,5 +1,5 @@
 // The player's settings, kept in a small key=value file between launches: %APPDATA%\bhoptools on
-// Windows, $XDG_CONFIG_HOME/bhoptools (~/.config) on Linux. Game thread only.
+// Windows, $XDG_CONFIG_HOME/bhoptools (~/.config) on Linux; bhoptools-dev for the dev build. Game thread only.
 #pragma once
 
 #include <functional>
