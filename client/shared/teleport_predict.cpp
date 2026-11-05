@@ -1805,6 +1805,16 @@ void TeleportPredict_OnCheckpointSave(int cpIndex)
     PredSaveCheckpoint(tp::g_rt, (*tp::g_checkpoints)[cpIndex]);
 }
 
+void TeleportPredict_PruneCheckpoints(bool (*inUse)(int cpIndex))
+{
+    if (!tp::g_checkpoints) return;
+    for (auto it = tp::g_checkpoints->begin(); it != tp::g_checkpoints->end();) {
+        // A load waiting for the next move points at its state.
+        if (&it->second == tp::g_rt.cpLoad || inUse(it->first)) ++it;
+        else it = tp::g_checkpoints->erase(it);
+    }
+}
+
 void TeleportPredict_OnCheckpointLoad(int cpIndex, bool kz)
 {
     auto it = tp::g_checkpoints->find(cpIndex);

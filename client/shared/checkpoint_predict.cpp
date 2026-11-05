@@ -583,14 +583,35 @@ void ReadState(const CCommandX& c, Slot* s)
 	s->ducking  = ArgInt(c, 21) != 0;
 }
 
+// shavit's maxcp goes up to 10000. Until the server has sent its own, a number past 1000 is taken
+// as a bad message.
+const int kCpIndexLimit = 10000;
+
+bool ValidCpIndex(int index)
+{
+	const int cap = g_cpMax > 0 ? (g_cpMax < kCpIndexLimit ? g_cpMax : kCpIndexLimit) : 1000;
+	return index >= 1 && index <= cap;
+}
+
 // Keeps the trigger sim snapshot id while the number still holds the same checkpoint;
 // after shavit renumbers, the id would belong to another one.
 void Remember(Slot& s)
 {
+	if (!ValidCpIndex(s.index)) return;
 	if ((int)g_cps.size() <= s.index) g_cps.resize(s.index + 1);
 	Slot& m = g_cps[s.index];
 	if (m.index && memcmp(&m.origin, &s.origin, sizeof(Vec)) == 0) s.id = m.id;
 	m = s;
+}
+
+// Whether a trigger sim snapshot id can still be teleported to.
+bool SnapshotInUse(int id)
+{
+	for (int i = 0; i < g_slotCount; ++i)
+		if (g_slots[i].id == id) return true;
+	for (const Slot& s : g_cps)
+		if (s.index && s.id == id) return true;
+	return g_hold.active && g_hold.slot.id == id;
 }
 
 // <flags> <x> <y> <z> <pitch> <yaw> <gravity> <laggedmovement> from argument `first`, floats as bits.
@@ -660,7 +681,8 @@ void Cmd_Ack(const CCommandX& c)
 	DropLost(cmdnum);
 
 	if (kind == 's') {
-		if (!index || c.argc < 22) {
+		// A number out of range is taken like a refused save.
+		if (!ValidCpIndex(index) || c.argc < 22) {
 			if (Slot* s = FindSlot(cmdnum)) RemoveSlot(s);
 			RedrawMenu();
 			return;
@@ -670,7 +692,7 @@ void Cmd_Ack(const CCommandX& c)
 		g_lastKz = s->kz;
 		Remember(*s);
 	} else if (kind == 'l') {
-		if (!index || c.argc < 22) return;
+		if (!ValidCpIndex(index) || c.argc < 22) return;
 		Slot s = {};
 		ReadState(c, &s);
 		Remember(s);
@@ -708,9 +730,11 @@ void Cmd_Ack(const CCommandX& c)
 			break;
 		}
 	} else if (kind == 'n') {
+		const int max = ArgInt(c, 5);
+		if (index < 0 || index > kCpIndexLimit || max < 0 || max > kCpIndexLimit) return;
 		g_cpTotal = index;
 		g_cpTotalCmd = cmdnum;
-		g_cpMax = ArgInt(c, 5);
+		g_cpMax = max;
 		const int keep = CountWithPending(INT_MAX);
 		if ((int)g_cps.size() > keep + 1) g_cps.resize(keep + 1);
 	} else if (kind == 'o') {
@@ -2006,6 +2030,7 @@ void Hooked_ProcessMovement(void* self, void* player, void* mv)
 		} else {
 			Save(player, mv, key);
 			TeleportPredict_OnCheckpointSave(FindSlot(key)->id);
+			TeleportPredict_PruneCheckpoints(SnapshotInUse);
 			if (firstRun) {
 				if (!menuSave) PrintSaved(key);
 				RedrawMenu();
