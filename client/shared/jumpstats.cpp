@@ -40,7 +40,7 @@ const uint32_t JHUD_ENABLED = 1u << 0, JHUD_JSS = 1u << 1, JHUD_SYNC = 1u << 2, 
 	SHOWKEYS_ENABLED = 1u << 26, SHOWKEYS_SIMPLE = 1u << 27, SHOWKEYS_UNRELIABLE = 1u << 28,
 	SHOWYAWS_ENABLED = 1u << 29, SPEEDOMETER_SMALL_VELOCITY = 1u << 30, SPEEDOMETER_COMPARISON = 1u << 31;
 const int JHUD_HIDE_JUMP = 1 << 0, JHUD_HIDE_SPEED = 1 << 1, JHUD_HIDE_GAIN = 1 << 2;
-// Bools2. MMOD_GAIN shows the mmod gain, BOTH_GAIN "old / mmod", LINEAR_GAIN the mmod gain on the old gain's scale,
+// Bools2. MMOD_GAIN shows the mmod gain, BOTH_GAIN "old / linear", LINEAR_GAIN the mmod gain on the old gain's scale,
 // none of them the old gain. Bits 5-8 are the compact trainers' colour, bits 10-11 the slow ticks HUD: 0 off,
 // 1-3 ticks per strafe under 25/50/75% jss.
 const int PRESTRAFETRAINER_ENABLED = 1 << 0, MMOD_GAIN = 1 << 1, BOTH_GAIN = 1 << 2, TRAINER_COMPACT = 1 << 3,
@@ -356,7 +356,7 @@ void Jhud(int jump, int speed, float gain, float mmod, float sync, float jss, fl
 		// with gain modes the mmod gain has three decimals; "both" and linear only come with them
 		if (!(hidden & JHUD_HIDE_GAIN)) {
 			if (bits & LINEAR_GAIN) stats = Fmt("%.2f", LinearGain(mmod));
-			else if (bits & BOTH_GAIN) stats = Fmt("%.2f / %.3f", gain, mmod);
+			else if (bits & BOTH_GAIN) stats = Fmt("%.2f / %.2f", gain, LinearGain(mmod));
 			else if (!(bits & MMOD_GAIN)) stats = Fmt("%.2f", gain);
 			else stats = Cvar(JSCV_GAINMODES) ? Fmt("%.3f", mmod) : Fmt("%.2f", mmod);
 		}
@@ -492,8 +492,12 @@ void SsjWrite(int jump, int speed, int strafes, float maxHeight, float heightDel
 			append(LinearGain(mmod), GainColorIdx(mmod), false);
 		} else {
 			if (!(bits & MMOD_GAIN)) append(gain, PercentageColorIdx(gain, true), false);
-			if (bits & BOTH_GAIN) m += Fmt(" %s/ ", t);
-			if (bits & (MMOD_GAIN | BOTH_GAIN)) append(mmod, GainColorIdx(mmod), Cvar(JSCV_GAINMODES));
+			if (bits & BOTH_GAIN) {
+				m += Fmt(" %s/ ", t);
+				append(LinearGain(mmod), GainColorIdx(mmod), false);
+			} else if (bits & MMOD_GAIN) {
+				append(mmod, GainColorIdx(mmod), Cvar(JSCV_GAINMODES));
+			}
 		}
 	}
 	if (Has(SSJ_SYNC)) m += decimals ? Fmt(" %s| S: %s%.2f%%", t, v, sync) : Fmt(" %s| S: %s%i%%", t, v, RoundToFloor(sync));
