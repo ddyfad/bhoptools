@@ -1,0 +1,5 @@
+# Release keys for SHA256SUMS.sig, in ssh-keygen's allowed_signers format (ssh-keygen -Y verify -f).
+# Keep in line with kReleaseKeys in client/shared/release_sig.cpp. ssh-keygen doesn't check the
+# security key's PIN flag; the workflows' check_sums (the client's own check) does.
+release namespaces="bhoptools-release" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIO5VVrqS8SoOXuUdbUgw3pGQlXmAt2EFaS7sSQr2k4CDAAAAFXNzaDpiaG9wdG9vbHMtcmVsZWFzZQ== bhoptools-release
+# BACKUP KEY: release-backup namespaces="bhoptools-release" <its public key line>

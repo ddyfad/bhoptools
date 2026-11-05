@@ -97,11 +97,13 @@ Only builds that still have a release (the newest 30) can be installed.
 
 ## Promoting
 
-When a dev build is good: Actions, "Staging (dev builds, promote)", Run workflow, or
+A public release takes two runs of "Staging (dev builds, promote)", with the release key signing
+in between. Nothing goes public until the second run has checked the signature.
+
+**Step 1: build.** When a dev build is good (cmd.exe, one line):
 
 ```
-gh workflow run staging.yml -R ddyfad/bhoptools-staging --ref sourcejump \
-  -f dev_tag=dev-48 -f version=1.13 -f notes="what changed" -f required_update=false -f prerelease=false
+gh workflow run staging.yml -R ddyfad/bhoptools-staging --ref sourcejump -f dev_tag=dev-48 -f version=1.13 -f notes="what changed" -f required_update=false -f prerelease=false
 ```
 
 It:
@@ -110,16 +112,98 @@ It:
    part of `dev-48`'s history (fast-forward only; if public has commits staging doesn't, merge them
    here first and promote the dev build that makes);
 2. builds the public variant from `dev-48`'s commit with `version.h` set to `1.13`;
-3. pushes that commit to the public `sourcejump` branch;
-4. publishes release `1.13` on ddyfad/bhoptools with `bhoptools.exe`, `bhoptools-linux.tar.gz`,
-   `bhoptools.so` and `bhoptools`, and the notes in the format the public client reads (`[required]`
-   when ticked, the notes, then `---` and the install text). The line under `---` records the commit and
-   dev tag.
+3. writes `SHA256SUMS`: the line `# bhoptools release 1.13`, then the sha256 of `bhoptools.exe`,
+   `bhoptools-linux.tar.gz`, `bhoptools.so` and `bhoptools`;
+4. keeps the files, `SHA256SUMS`, the notes and the inputs as the run's `release` artifact, and
+   puts the commands for the next steps, with its run id filled in, in the run's summary.
+
+**Step 2: sign** `SHA256SUMS` with the YubiKey. In cmd.exe, with the run id from step 1 (or
+`gh run list -R ddyfad/bhoptools-staging -w staging.yml -L 5`):
+
+```
+gh run download <run id> -R ddyfad/bhoptools-staging -n release -D %USERPROFILE%\bhoptools-release\1.13
+type %USERPROFILE%\bhoptools-release\1.13\out\SHA256SUMS
+ssh-keygen -Y sign -n bhoptools-release -f %USERPROFILE%\.ssh\bhoptools-release %USERPROFILE%\bhoptools-release\1.13\out\SHA256SUMS
+```
+
+Check that the first line says the version you mean before signing. `ssh-keygen` asks for the
+PIN and a touch, and writes `SHA256SUMS.sig` next to it. Optionally check it, from a checkout of
+this repo:
+
+```
+ssh-keygen -Y verify -f .github\release_signers -I release -n bhoptools-release -s %USERPROFILE%\bhoptools-release\1.13\out\SHA256SUMS.sig < %USERPROFILE%\bhoptools-release\1.13\out\SHA256SUMS
+```
+
+**Step 3: publish.**
+
+```
+gh workflow run staging.yml -R ddyfad/bhoptools-staging --ref sourcejump -f build_run=<run id> -F sums_signature=@%USERPROFILE%\bhoptools-release\1.13\out\SHA256SUMS.sig
+```
+
+`-F ...=@file` makes gh read the value from the file. The web form works too (paste the whole
+`.sig`; it joins the lines, and the workflow puts them back). The run:
+
+1. takes the files from step 1's `release` artifact (they're not rebuilt, so they're the files
+   that were signed);
+2. checks `SHA256SUMS.sig` with `ssh-keygen -Y verify` against `.github/release_signers`, then
+   with the client's own check (`client/tests/check_sums`): a pinned key, the YubiKey's
+   user-presence and PIN flags, the version line, and every file's sha256;
+3. pushes the commit to the public `sourcejump` branch;
+4. publishes release `1.13` on ddyfad/bhoptools with the four files, `SHA256SUMS` and
+   `SHA256SUMS.sig`, and the notes in the format the public client reads (`[required]` when ticked,
+   the notes, then `---` and the install text). The line under `---` records the commit and dev
+   tag.
+
+The public repo's own `build-windows.yml` has the same two steps: `release_tag` (step 1), then
+`build_run` and `sums_signature` (`gh workflow run build-windows.yml -R ddyfad/bhoptools ...`).
 
 Merging public `sourcejump` into public `main` is still done there, by PR.
 
 Everything in this repo goes public with the commit, this file and `staging.yml` included. The
 workflow checks the repository name, so it does nothing in the public repo.
+
+### What the client checks
+
+From the first release built with this, the public client installs an update only when:
+
+- the release has `SHA256SUMS` and `SHA256SUMS.sig`;
+- the signature is SSHSIG in namespace `bhoptools-release`, from one of the keys pinned in
+  `client/shared/release_sig.cpp` (`kReleaseKeys`), and for the YubiKey key with both the
+  user-presence and user-verification (PIN) flags set;
+- the first line of `SHA256SUMS` is `# bhoptools release <the release's tag>`, so a signed
+  `SHA256SUMS` from an older release can't be put on a newer tag;
+- the downloaded `bhoptools.exe` (Windows) or `bhoptools.so` and `bhoptools` (Linux) have the
+  sha256 it lists.
+
+It checks before asking, so nobody is offered a release that won't install; a release that fails
+is logged (console / `[bhoptools]`) and shown in a popup, and the current version starts. A
+`[required]` release gets no exception.
+
+Clients older than this don't check anything, so the first signed release reaches them as any
+release did. Every release after it must be signed or nobody on a current version gets it.
+
+### Release keys
+
+The release key is on a YubiKey (`sk-ssh-ed25519@openssh.com`, application
+`ssh:bhoptools-release`, made with `verify-required`); the private key never touches GitHub or
+this repo. The keys are pinned in two places that must agree: `kReleaseKeys` in
+`client/shared/release_sig.cpp` (what clients trust) and `.github/release_signers` (what the
+workflows check with). Both have a marked slot for a backup key. A backup YubiKey key must also
+be made with `-O verify-required`, or the client refuses its signatures; a plain `ssh-ed25519`
+key has no flags to check.
+
+Changing the keys only takes effect for clients that have installed a release with the new list,
+so sign the release that changes them with a key the previous release already trusts.
+
+### Dev builds
+
+Dev builds are not signed: they come from this private repo through a token, and signing every
+push with the YubiKey would make them useless. `bhoptools-dev` checks each download's size and
+sha256 against what the GitHub API lists for the asset (`size`, `digest`), and logs when the API
+gives no digest. That catches a broken or swapped download. It does not protect against anyone who
+can publish releases in this repo (a leaked `GITHUB_TOKEN` in a workflow, a compromised account or
+PAT with write access to `ddyfad/bhoptools-staging`), or against the API itself: whoever can upload
+an asset gets a matching digest from GitHub. Only the people running `bhoptools-dev` are exposed.
 
 ### Why promote rebuilds
 
