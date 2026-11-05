@@ -1,0 +1,315 @@
+name: Staging (dev builds, promote)
+
+# Only for ddyfad/bhoptools-staging; see STAGING.md. Promote pushes this file to the public repo
+# along with everything else, so every job checks the repository first.
+#
+# Push: builds bhoptools-dev and the public variant. Pushes to sourcejump and dev/* publish them
+# as the pre-release dev-<run number>, which bhoptools-dev updates from.
+# Run by hand (promote): pushes a dev build's commit to the public sourcejump branch, rebuilds the
+# public variant from it with only version.h changed, and publishes that as a public release.
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      dev_tag:
+        description: "Dev build to promote (e.g. dev-48)"
+        required: true
+      version:
+        description: "Public version to publish it as (e.g. 1.13)"
+        required: true
+      notes:
+        description: "Release notes, shown in the update popup"
+        required: false
+        default: ""
+      required_update:
+        description: "Required update: installed for everyone, even those who chose never to update"
+        type: boolean
+        required: false
+        default: false
+      prerelease:
+        description: "Mark the public release as a pre-release"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    if: github.repository == 'ddyfad/bhoptools-staging'
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.prepare.outputs.sha }}
+      version: ${{ steps.prepare.outputs.version }}
+      variants: ${{ steps.prepare.outputs.variants }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Work out what to build
+        id: prepare
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
+          DEV_TAG: ${{ inputs.dev_tag }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -e
+          if [ "$GITHUB_EVENT_NAME" != workflow_dispatch ]; then
+            echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            echo "version=dev-$GITHUB_RUN_NUMBER (${GITHUB_SHA::7})" >> "$GITHUB_OUTPUT"
+            echo 'variants=["public","dev"]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          [[ "$DEV_TAG" =~ ^dev-[0-9]+$ ]] || { echo "::error::dev_tag should look like dev-48"; exit 1; }
+          # "dev" switches the update check off and dev-<n> is the dev client's.
+          [[ "$VERSION" =~ ^[0-9A-Za-z._-]+$ && "$VERSION" != dev* ]] || { echo "::error::version should look like 1.13"; exit 1; }
+          [ -n "$GH_TOKEN" ] || { echo "::error::the PUBLIC_REPO_TOKEN secret isn't set (STAGING.md)"; exit 1; }
+          sha=$(git rev-parse -q --verify "refs/tags/$DEV_TAG^{commit}") || { echo "::error::no tag $DEV_TAG in this repo"; exit 1; }
+          if gh release view "$VERSION" -R ddyfad/bhoptools >/dev/null 2>&1; then
+            echo "::error::ddyfad/bhoptools already has a release $VERSION"
+            exit 1
+          fi
+          # Fast-forward only: the public branch must already be part of the dev build's history.
+          if git fetch -q https://github.com/ddyfad/bhoptools.git sourcejump; then
+            if ! git merge-base --is-ancestor FETCH_HEAD "$sha"; then
+              echo "::error::public sourcejump ($(git rev-parse --short FETCH_HEAD)) has commits that $DEV_TAG ($sha) doesn't. Merge it into staging, push, and promote the dev build that makes."
+              exit 1
+            fi
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo 'variants=["public"]' >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        variant: ${{ fromJSON(needs.prepare.outputs.variants) }}
+    env:
+      NAME: ${{ matrix.variant == 'dev' && 'bhoptools-dev' || 'bhoptools' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          submodules: recursive
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Set version
+        shell: bash
+        env:
+          APP_VERSION: ${{ needs.prepare.outputs.version }}
+        run: echo "#define APP_VERSION \"$APP_VERSION\"" > client/shared/version.h
+
+      - name: Build Release x64
+        shell: pwsh
+        run: |
+          if ('${{ matrix.variant }}' -eq 'dev') {
+            # cl.exe takes extra options from CL.
+            $env:CL = '/DBHOPTOOLS_DEV'
+          }
+          msbuild client/bhoptools.sln /p:Configuration=Release /p:Platform=x64 /p:TargetName=$env:NAME /m /v:minimal
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-${{ matrix.variant }}
+          path: |
+            client/x64/Release/${{ env.NAME }}.exe
+            client/x64/Release/${{ env.NAME }}.pdb
+            client/windows/x64/Release/${{ env.NAME }}.exe
+            client/windows/x64/Release/${{ env.NAME }}.pdb
+          if-no-files-found: error
+
+  build-linux:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        variant: ${{ fromJSON(needs.prepare.outputs.variants) }}
+    env:
+      NAME: ${{ matrix.variant == 'dev' && 'bhoptools-dev' || 'bhoptools' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+
+      - name: Set version
+        env:
+          APP_VERSION: ${{ needs.prepare.outputs.version }}
+        run: echo "#define APP_VERSION \"$APP_VERSION\"" > client/shared/version.h
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.variant }}" = dev ]; then
+            make -C client/linux CXX="g++ -DBHOPTOOLS_DEV" SO_NAME=bhoptools-dev.so EXE_NAME=bhoptools-dev all check-glibc
+          else
+            make -C client/linux all check-glibc
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.variant }}
+          path: |
+            client/linux/${{ env.NAME }}.so
+            client/linux/${{ env.NAME }}
+          if-no-files-found: error
+
+  dev-release:
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/sourcejump' || startsWith(github.ref, 'refs/heads/dev/'))
+    needs: [prepare, build, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    # One at a time, so each one's notes start from the release before it.
+    concurrency:
+      group: dev-release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: dev-${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      # Artifacts lose the executable bit; the tarball keeps it.
+      - name: Package
+        run: |
+          set -e
+          mkdir out pkg
+          # $1 variant, $2 file name, $3 asset prefix
+          package() {
+            cp "$(find dist/win-$1 -name "$2.exe" | head -1)" "out/$3$2.exe"
+            mkdir "pkg/$2-linux"
+            cp "dist/linux-$1/$2.so" "dist/linux-$1/$2" "pkg/$2-linux/"
+            chmod +x "pkg/$2-linux/$2"
+            tar czf "out/$3$2-linux.tar.gz" -C pkg "$2-linux"
+            cp "pkg/$2-linux/$2.so" "out/$3$2.so"
+            cp "pkg/$2-linux/$2" "out/$3$2"
+          }
+          package dev bhoptools-dev ""
+          package public bhoptools public-
+          ls -l out
+
+      - name: Notes
+        run: |
+          set -e
+          # Not this run's own tag, which a re-run finds.
+          prev=$(gh release list --limit 100 --json tagName --jq '.[].tagName' | grep -E '^dev-[0-9]+$' | grep -vx "$TAG" | sort -t- -k2,2 -rn | head -1 || true)
+          {
+            if [ -n "$prev" ] && git rev-parse -q --verify "refs/tags/$prev" >/dev/null; then
+              git log --no-merges --format='- %s' "$prev..$GITHUB_SHA" | head -50
+            else
+              git log --no-merges --format='- %s' -10 "$GITHUB_SHA"
+            fi
+            echo
+            echo "$GITHUB_REF_NAME ${GITHUB_SHA::7}"
+          } > notes.md
+          cat notes.md
+
+      - name: Publish
+        run: |
+          set -e
+          if gh release view "$TAG" >/dev/null 2>&1; then gh release delete "$TAG" --yes --cleanup-tag; fi
+          gh release create "$TAG" out/* --target "$GITHUB_SHA" --title "$TAG" --notes-file notes.md --prerelease --latest=false
+
+      - name: Keep the newest 30
+        run: |
+          set -e
+          gh release list --limit 200 --json tagName --jq '.[].tagName' | grep -E '^dev-[0-9]+$' | sort -t- -k2,2 -rn | tail -n +31 | while read -r old; do
+            echo "deleting $old"
+            gh release delete "$old" --yes --cleanup-tag
+          done
+
+  promote:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [prepare, build, build-linux]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
+      SHA: ${{ needs.prepare.outputs.sha }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+      DEV_TAG: ${{ inputs.dev_tag }}
+      NOTES: ${{ inputs.notes }}
+    steps:
+      # Without persisted credentials, so the push below uses the public repo's token.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: win-public
+          path: dist/windows
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-public
+          path: dist/linux
+
+      - name: Package
+        run: |
+          set -e
+          mkdir out
+          cp "$(find dist/windows -name bhoptools.exe | head -1)" out/bhoptools.exe
+          mkdir bhoptools-linux
+          cp dist/linux/bhoptools.so dist/linux/bhoptools bhoptools-linux/
+          chmod +x bhoptools-linux/bhoptools
+          tar czf out/bhoptools-linux.tar.gz bhoptools-linux
+          cp bhoptools-linux/* out/
+
+      - name: Push to the public sourcejump branch
+        run: |
+          git remote add public "https://x-access-token:${GH_TOKEN}@github.com/ddyfad/bhoptools.git"
+          if ! git push public "$SHA:refs/heads/sourcejump"; then
+            echo "::error::couldn't push $SHA to public sourcejump: it moved since the check (not a fast-forward any more), or PUBLIC_REPO_TOKEN lacks Contents or Workflows write"
+            exit 1
+          fi
+
+      # The same body as build-windows.yml's release-client: the client shows what's above the ---.
+      - name: Publish
+        run: |
+          set -e
+          {
+            if [ "${{ inputs.required_update }}" = true ]; then echo '[required]'; else echo; fi
+            printf '%s\n' "$NOTES"
+            cat <<'EOF'
+
+          ---
+
+          Windows:
+          - Download `bhoptools.exe` and run it, it starts CS:S with `-insecure`.
+
+          Linux (64-bit CS:S):
+          - Download `bhoptools-linux.tar.gz` (or `bhoptools.so` and `bhoptools`) and extract it somewhere without spaces or `:` in the path.
+          - Run `./bhoptools` (`chmod +x` it first if you downloaded it on its own), and paste the launch options it prints into Steam.
+
+          Server plugin:
+          - Get `bhoptools.smx` from the [plugin release](https://github.com/ddyfad/bhoptools/releases/tag/plugin). It keeps itself up to date from there.
+
+          Both:
+          - Everything is switched on and off in Options → `Fixes`.
+          - `F5` autohop prediction (Windows), `F7` viewpunch remover, `F8` pingfix (client-side prediction of triggers, rngfix and the HUD speed).
+          - On servers running the [bhoptools plugin](https://github.com/ddyfad/bhoptools): checkpoints, noclip, restarts, shavit runspeed, landfix, easybhop, style key blocking, shavit-syncstyle autosync and momsurffix2 predicted, mpbhops_but_working doors, and the map state synced from the server.
+          EOF
+            echo
+            echo "Built from ${SHA}, tested as ${DEV_TAG}."
+          } > body.md
+          cat body.md
+          pre=""
+          if [ "${{ inputs.prerelease }}" = true ]; then pre="--prerelease"; fi
+          gh release create "$VERSION" -R ddyfad/bhoptools --target "$SHA" --title "$VERSION" --notes-file body.md $pre out/bhoptools.exe out/bhoptools-linux.tar.gz out/bhoptools.so out/bhoptools
