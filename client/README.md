@@ -22,7 +22,7 @@ Mouse and input
 * Mouse interpolation: each frame's raw mouse motion is spread over its ticks, like Momentum's `m_rawinput 2`. It sets `m_rawinput` to 1 (off: 0) after each level load and on every change, and starts on unless `m_rawinput` was 0.
 * Viewpunch remover: no punch from fall damage or rough landings, a client-side [SuppressViewpunch](https://github.com/xen-000/SuppressViewpunch). On by default.
 * Autohop prediction (BunnyhopAPE): Windows only, off by default.
-* High polling rate fix: Windows only, off by default. A 4-8 kHz mouse puts a message in the game's input queue every 125 us and the engine retrieves them one by one; this reads the raw input in one batch per frame and takes the cursor-move messages once per frame instead, the way Godot handles it. `bhoptools_pumpstats` prints what the input loop costs.
+* High polling rate fix: Windows only, on by default; `bhoptools_pollfix 0` turns it off, and `bhoptools_nolegacy 0` turns off just the part that registers the mouse without legacy messages while in game. A 4-8 kHz mouse puts a message in the game's input queue every 125 us and the engine retrieves them one by one; this reads the raw input in one batch per frame and takes the cursor-move messages once per frame instead, the way Godot handles it. `bhoptools_pumpstats` prints what the input loop costs.
 
 Prediction
 * Triggers: trigger teleports, pushes, boosters and their outputs, including map VScript that only touches the activator's velocity, origin and gravity. Anything a script does outside that is left to the server.
