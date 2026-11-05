@@ -28,6 +28,7 @@
 #include "version.h"
 #include "update_json.h"
 #include "dev_update.h"
+#include "release_sig.h"
 #include "options_tab.h"
 #include "spectate.h"
 #include "singleletter_fix.h"
@@ -486,17 +487,24 @@ bool dev::Download(const std::string& url, bool asset, const std::string& file)
 	return asset && !location.empty() && CurlDownload(location.c_str(), file.c_str());
 }
 
-static bool DevDownloadElf(const std::string& url, const char* path, char* err)
+// Downloads an ELF file and checks it against the size and digest the API listed; removed if it
+// doesn't match.
+static bool DevDownloadElf(const dev::Asset& asset, const char* path, char* err)
 {
-	if (!dev::Download(url, true, path)) {
+	if (!dev::Download(asset.url, true, path)) {
 		snprintf(err, 256, "the download failed (check the token in %s)", dev::TokenPath().c_str());
 		return false;
 	}
-	char magic[4] = {};
-	FILE* f = fopen(path, "rb");
-	if (f) { if (fread(magic, 1, 4, f) != 4) magic[0] = 0; fclose(f); }
-	if (!memcmp(magic, "\x7f" "ELF", 4)) return true;
-	snprintf(err, 256, "the download isn't an ELF file");
+	const std::string data = dev::ReadAll(path);
+	std::string why;
+	if (data.size() < 4 || memcmp(data.data(), "\x7f" "ELF", 4) != 0)
+		snprintf(err, 256, "the download isn't an ELF file");
+	else if (!dev::CheckAsset(asset, data, why))
+		snprintf(err, 256, "%s", why.c_str());
+	else {
+		if (asset.sha256.empty()) CoreLog("dev: the release lists no sha256 for %s, only its size was checked", path);
+		return true;
+	}
 	unlink(path);
 	return false;
 }
@@ -507,8 +515,8 @@ static bool DevInstall(const std::string& json, const std::string& tag, char* er
 {
 	const std::vector<dev::Build> builds = dev::Builds(json);
 	const dev::Build* b = dev::Find(builds, tag);
-	const std::string so = b ? dev::AssetUrl(json, *b, "bhoptools-dev.so") : "";
-	if (so.empty()) {
+	dev::Asset so;
+	if (!b || !dev::FindAsset(json, *b, "bhoptools-dev.so", so)) {
 		snprintf(err, 256, "%s has no bhoptools-dev.so", tag.c_str());
 		return false;
 	}
@@ -517,19 +525,27 @@ static bool DevInstall(const std::string& json, const std::string& tag, char* er
 		snprintf(err, 256, "can't find our own .so");
 		return false;
 	}
-	char newSo[PATH_MAX + 8];
+	// Downloaded aside and checked: the constructor installs whatever .so.new it finds.
+	char newSo[PATH_MAX + 8], download[PATH_MAX + 16];
 	snprintf(newSo, sizeof(newSo), "%s.new", info.dli_fname);
-	if (!DevDownloadElf(so, newSo, err)) return false;
+	snprintf(download, sizeof(download), "%s.download", info.dli_fname);
+	if (!DevDownloadElf(so, download, err)) return false;
+	if (rename(download, newSo) != 0) {
+		snprintf(err, 256, "can't rename the download: %s", strerror(errno));
+		unlink(download);
+		return false;
+	}
 
 	// The launcher only prints launch options, so it's best effort.
-	const std::string launcherUrl = dev::AssetUrl(json, *b, "bhoptools-dev");
+	dev::Asset launcherAsset;
 	char launcher[PATH_MAX + 32], newLauncher[PATH_MAX + 40];
 	snprintf(launcher, sizeof(launcher), "%s", info.dli_fname);
 	char* slash = strrchr(launcher, '/');
-	if (slash && !launcherUrl.empty()) {
+	if (slash && dev::FindAsset(json, *b, "bhoptools-dev", launcherAsset)) {
 		strcpy(slash + 1, "bhoptools-dev");
 		snprintf(newLauncher, sizeof(newLauncher), "%s.new", launcher);
-		if (access(launcher, F_OK) == 0 && DevDownloadElf(launcherUrl, newLauncher, err)) {
+		char launcherErr[256];
+		if (access(launcher, F_OK) == 0 && DevDownloadElf(launcherAsset, newLauncher, launcherErr)) {
 			chmod(newLauncher, 0755);
 			rename(newLauncher, launcher);
 		}
@@ -1198,14 +1214,29 @@ static int ShowSDLMessageBox(const char* message, const SDL_MessageBoxButtonData
 }
 
 #ifndef BHOPTOOLS_DEV
-static bool DownloadElf(const char* url, const char* path, char* err)
+static std::string ReadAll(const char* path)
+{
+	std::string data;
+	if (FILE* f = fopen(path, "rb")) {
+		char chunk[4096];
+		size_t n;
+		while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0) data.append(chunk, n);
+		fclose(f);
+	}
+	return data;
+}
+
+// Downloads an ELF file and checks it's the one with sha256 `hash`; removed if it isn't.
+static bool DownloadElf(const char* url, const char* path, const std::string& hash, char* err)
 {
 	if (!CurlDownload(url, path, err)) return false;
-	char magic[4] = {};
-	FILE* f = fopen(path, "rb");
-	if (f) { if (fread(magic, 1, 4, f) != 4) magic[0] = 0; fclose(f); }
-	if (!memcmp(magic, "\x7f" "ELF", 4)) return true;
-	snprintf(err, 256, "the download isn't an ELF file");
+	const std::string data = ReadAll(path);
+	if (data.size() < 4 || memcmp(data.data(), "\x7f" "ELF", 4) != 0)
+		snprintf(err, 256, "the download isn't an ELF file");
+	else if (relsig::Sha256Hex(data) != hash)
+		snprintf(err, 256, "the download isn't the file its signed SHA256SUMS lists");
+	else
+		return true;
 	unlink(path);
 	return false;
 }
@@ -1217,31 +1248,44 @@ static void* UpdateThread(void*)
 	const char* home = getenv("HOME");
 	if (!home) return nullptr;
 	const char* xdg = getenv("XDG_CONFIG_HOME");
-	char dir[PATH_MAX], ignoreFile[PATH_MAX + 32], jsonFile[PATH_MAX + 32];
+	char dir[PATH_MAX], ignoreFile[PATH_MAX + 32], cache[PATH_MAX];
 	if (xdg && *xdg) snprintf(dir, sizeof(dir), "%s/bhoptools", xdg);
 	else snprintf(dir, sizeof(dir), "%s/.config/bhoptools", home);
 	snprintf(ignoreFile, sizeof(ignoreFile), "%s/no_update_check", dir);
 	const bool ignored = access(ignoreFile, F_OK) == 0;
 
-	snprintf(jsonFile, sizeof(jsonFile), "%s/.cache", home);
-	mkdir(jsonFile, 0755);
-	strcat(jsonFile, "/bhoptools");
-	mkdir(jsonFile, 0755);
-	strcat(jsonFile, "/release.json");
-	if (!CurlDownload("https://api.github.com/repos/ddyfad/bhoptools/releases?per_page=20", jsonFile))
+	snprintf(cache, sizeof(cache), "%s/.cache", home);
+	mkdir(cache, 0755);
+	snprintf(cache, sizeof(cache), "%s/.cache/bhoptools", home);
+	mkdir(cache, 0755);
+	const std::string jsonFile = std::string(cache) + "/release.json";
+	if (!CurlDownload("https://api.github.com/repos/ddyfad/bhoptools/releases?per_page=20", jsonFile.c_str()))
 		return nullptr;
-	std::string json;
-	if (FILE* f = fopen(jsonFile, "rb")) {
-		char chunk[4096];
-		size_t n;
-		while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0) json.append(chunk, n);
-		fclose(f);
-	}
-	unlink(jsonFile);
+	const std::string json = ReadAll(jsonFile.c_str());
+	unlink(jsonFile.c_str());
 	std::string changelog;
 	bool required = false;
 	const std::string tag = Changelog(json, APP_VERSION, changelog, &required);
 	if (tag.empty() || (ignored && !required)) return nullptr;
+
+	// Checked before asking, so nobody is offered a release that won't install. Required or not,
+	// nothing goes in without SHA256SUMS signed by a release key.
+	const std::string base = "https://github.com/ddyfad/bhoptools/releases/download/" + tag + "/";
+	const std::string sumsFile = std::string(cache) + "/SHA256SUMS", sigFile = sumsFile + ".sig";
+	const bool fetched = CurlDownload((base + "SHA256SUMS").c_str(), sumsFile.c_str())
+		&& CurlDownload((base + "SHA256SUMS.sig").c_str(), sigFile.c_str());
+	const std::string sums = ReadAll(sumsFile.c_str()), sig = ReadAll(sigFile.c_str());
+	unlink(sumsFile.c_str());
+	unlink(sigFile.c_str());
+	std::string soHash, launcherHash, why = "couldn't download its SHA256SUMS and SHA256SUMS.sig";
+	if (!fetched || !relsig::CheckSums(sums, sig, tag, "bhoptools.so", soHash, why)) {
+		CoreLog("not updating to %s: it couldn't be verified (%s)", tag.c_str(), why.c_str());
+		ShowSDLMessageBox((tag + " is out, but it couldn't be verified as signed by the bhoptools release key, so it won't be installed:\n\n"
+			+ why + "\n\nThe current version (" APP_VERSION ") is unchanged.").c_str(), nullptr, 0);
+		return nullptr;
+	}
+	// The launcher only prints launch options: if the release doesn't list it, it's left as it is.
+	const bool launcherListed = relsig::ParseSums(sums, tag, "bhoptools", launcherHash, why);
 
 	if (required) {
 		ShowSDLMessageBox(("A required update is being installed: " + tag + " (you have " APP_VERSION ").\n\nChangelog:\n\n" + changelog).c_str(), nullptr, 0);
@@ -1262,25 +1306,32 @@ static void* UpdateThread(void*)
 
 	Dl_info info;
 	if (!dladdr((void*)&UpdateThread, &info) || !info.dli_fname) return nullptr;
-	char soPath[PATH_MAX], newSo[PATH_MAX + 8], url[256];
+	// Downloaded aside and checked: the constructor installs whatever .so.new it finds.
+	char soPath[PATH_MAX], newSo[PATH_MAX + 8], download[PATH_MAX + 16], url[256];
 	snprintf(soPath, sizeof(soPath), "%s", info.dli_fname);
 	snprintf(newSo, sizeof(newSo), "%s.new", soPath);
-	snprintf(url, sizeof(url), "https://github.com/ddyfad/bhoptools/releases/download/%s/bhoptools.so", tag.c_str());
+	snprintf(download, sizeof(download), "%s.download", soPath);
+	snprintf(url, sizeof(url), "%sbhoptools.so", base.c_str());
 	char err[256];
-	if (!DownloadElf(url, newSo, err)) {
+	if (!DownloadElf(url, download, soHash, err)) {
+		CoreLog("updating to %s failed: %s", tag.c_str(), err);
 		ShowSDLMessageBox(("Update failed, the current version is unchanged.\n\n" + std::string(err)).c_str(), nullptr, 0);
 		return nullptr;
 	}
+	if (rename(download, newSo) != 0) {
+		unlink(download);
+		ShowSDLMessageBox(("Update failed, the current version is unchanged.\n\ncan't rename the download: " + std::string(strerror(errno))).c_str(), nullptr, 0);
+		return nullptr;
+	}
 
-	// The launcher only prints launch options, so it's best effort.
 	char launcher[PATH_MAX + 32], newLauncher[PATH_MAX + 40];
 	snprintf(launcher, sizeof(launcher), "%s", soPath);
 	char* slash = strrchr(launcher, '/');
-	if (slash) {
+	if (slash && launcherListed) {
 		strcpy(slash + 1, "bhoptools");
 		snprintf(newLauncher, sizeof(newLauncher), "%s.new", launcher);
-		snprintf(url, sizeof(url), "https://github.com/ddyfad/bhoptools/releases/download/%s/bhoptools", tag.c_str());
-		if (access(launcher, F_OK) == 0 && DownloadElf(url, newLauncher, err)) {
+		snprintf(url, sizeof(url), "%sbhoptools", base.c_str());
+		if (access(launcher, F_OK) == 0 && DownloadElf(url, newLauncher, launcherHash, err)) {
 			chmod(newLauncher, 0755);
 			rename(newLauncher, launcher);
 		}

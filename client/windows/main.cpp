@@ -1,3 +1,5 @@
+// For rand_s, before anything includes stdlib.h.
+#define _CRT_RAND_S
 #include <Windows.h>
 #include <winhttp.h>
 #include <atomic>
@@ -7,10 +9,12 @@
 #include <vector>
 #include <conio.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "utils.h"
 #include "version.h"
 #include "update_json.h"
 #include "dev_update.h"
+#include "release_sig.h"
 #include "sigs.h"
 #include "download_progress.h"
 #include "fastdl.h"
@@ -357,8 +361,11 @@ bool HttpsDownload(const wchar_t* host, const wchar_t* path, const wchar_t* file
 		return false;
 #endif
 
-	wchar_t tmp[MAX_PATH + 8];
-	swprintf(tmp, sizeof(tmp) / sizeof(tmp[0]), L"%ls.part", file);
+	unsigned int r1 = GetTickCount(), r2 = GetCurrentThreadId();
+	rand_s(&r1);
+	rand_s(&r2);
+	wchar_t tmp[MAX_PATH + 32];
+	swprintf(tmp, sizeof(tmp) / sizeof(tmp[0]), L"%ls.%08x%08x.part", file, r1, r2);
 	bool ok = false;
 	HINTERNET session = open(L"bhoptools", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
 		WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
@@ -458,13 +465,54 @@ bool dev::Download(const std::string& url, bool asset, const std::string& file)
 }
 #endif
 
+#ifdef BHOPTOOLS_DEV
+#define SETTINGS_DIR_W L"bhoptools-dev"
+#else
+#define SETTINGS_DIR_W L"bhoptools"
+#endif
+
+// %APPDATA%\bhoptools\tmp (bhoptools-dev for the dev client), for downloads and the lump
+// checksums, with the .part files of downloads that never finished removed. A download still
+// running has its .part open, so that one stays. Empty when there's no such folder.
+std::wstring TempDir()
+{
+	wchar_t buf[MAX_PATH];
+	const DWORD len = GetEnvironmentVariableW(L"APPDATA", buf, MAX_PATH);
+	if (!len || len >= MAX_PATH)
+		return L"";
+	const std::wstring settingsDir = std::wstring(buf) + L"\\" SETTINGS_DIR_W;
+	const std::wstring dir = settingsDir + L"\\tmp";
+	CreateDirectoryW(settingsDir.c_str(), nullptr);
+	CreateDirectoryW(dir.c_str(), nullptr);
+	const DWORD attr = GetFileAttributesW(dir.c_str());
+	if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY))
+		return L"";
+
+	WIN32_FIND_DATAW fd;
+	HANDLE find = FindFirstFileW((dir + L"\\*.part").c_str(), &fd);
+	if (find != INVALID_HANDLE_VALUE)
+	{
+		do
+			DeleteFileW((dir + L"\\" + fd.cFileName).c_str());
+		while (FindNextFileW(find, &fd));
+		FindClose(find);
+	}
+	return dir;
+}
+
+std::string ReadAll(const std::wstring& path)
+{
+	std::ifstream in(path, std::ios::binary);
+	return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
 FILE* fastdl::OpenLumpChecksums()
 {
-	wchar_t path[MAX_PATH];
-	DWORD len = GetTempPathW(MAX_PATH - 20, path);
-	if (!len || len >= MAX_PATH - 20)
+	const std::wstring dir = TempDir();
+	if (dir.empty())
 		return nullptr;
-	wcscat(path, L"lump_checksums.csv");
+	const std::wstring file = dir + L"\\lump_checksums.csv";
+	const wchar_t* path = file.c_str();
 
 	WIN32_FILE_ATTRIBUTE_DATA attr;
 	bool fresh = false;
@@ -1145,13 +1193,13 @@ bool SelfUpdate()
 	// The previous update's exe was still running when it was renamed.
 	DeleteFileW(old.c_str());
 
-	GetTempPathW(MAX_PATH, buf);
-	const std::wstring jsonFile = std::wstring(buf) + L"bhoptools_release.json";
+	const std::wstring tmp = TempDir();
+	if (tmp.empty())
+		return false;
+	const std::wstring jsonFile = tmp + L"\\releases.json";
 	if (!HttpsDownload(L"api.github.com", L"/repos/ddyfad/bhoptools/releases?per_page=20", jsonFile.c_str()))
 		return false;
-	std::ifstream in(jsonFile, std::ios::binary);
-	std::string json((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-	in.close();
+	const std::string json = ReadAll(jsonFile);
 	DeleteFileW(jsonFile.c_str());
 
 	std::string changelog;
@@ -1160,7 +1208,27 @@ bool SelfUpdate()
 	if (tag.empty() || (ignored && !required))
 		return false;
 
+	// Checked before asking, so nobody is offered a release that won't install. Required or not,
+	// nothing goes in without SHA256SUMS signed by a release key.
+	const std::wstring download = L"/ddyfad/bhoptools/releases/download/" + std::wstring(tag.begin(), tag.end()) + L"/";
+	const std::wstring sumsFile = tmp + L"\\SHA256SUMS", sigFile = tmp + L"\\SHA256SUMS.sig";
+	const bool fetched = HttpsDownload(L"github.com", (download + L"SHA256SUMS").c_str(), sumsFile.c_str())
+		&& HttpsDownload(L"github.com", (download + L"SHA256SUMS.sig").c_str(), sigFile.c_str());
+	const std::string sums = ReadAll(sumsFile), sig = ReadAll(sigFile);
+	DeleteFileW(sumsFile.c_str());
+	DeleteFileW(sigFile.c_str());
+	std::string expected, err = "couldn't download its SHA256SUMS and SHA256SUMS.sig";
 	wchar_t wtext[2048];
+	if (!fetched || !relsig::CheckSums(sums, sig, tag, "bhoptools.exe", expected, err))
+	{
+		printf("not updating to %s: it couldn't be verified (%s)\n\n", tag.c_str(), err.c_str());
+		const std::string text = tag + " is out, but it couldn't be verified as signed by the bhoptools release key, so it won't be installed:\n\n"
+			+ err + "\n\nStarting the current version (" APP_VERSION ").";
+		MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wtext, 2048);
+		MessageBoxW(NULL, wtext, L"bhoptools update", MB_OK | MB_ICONWARNING | MB_TOPMOST);
+		return false;
+	}
+
 	if (required)
 	{
 		const std::string text = "A required update is being installed: " + tag + " (you have " APP_VERSION ").\n\nChangelog:\n\n" + changelog;
@@ -1181,14 +1249,27 @@ bool SelfUpdate()
 			return false;
 	}
 
-	const std::wstring path = L"/ddyfad/bhoptools/releases/download/" + std::wstring(tag.begin(), tag.end()) + L"/bhoptools.exe";
-	char magic[2] = {};
-	if (HttpsDownload(L"github.com", path.c_str(), fresh.c_str()))
-		std::ifstream(fresh, std::ios::binary).read(magic, 2);
-	if (magic[0] != 'M' || magic[1] != 'Z')
+	// Downloaded aside and checked before it goes next to the exe as .new.
+	const std::wstring exeFile = tmp + L"\\bhoptools.exe";
+	if (!HttpsDownload(L"github.com", (download + L"bhoptools.exe").c_str(), exeFile.c_str()))
 	{
-		DeleteFileW(fresh.c_str());
 		printf("update download failed, starting the current version\n");
+		return false;
+	}
+	const std::string exe = ReadAll(exeFile);
+	if (exe.size() < 2 || exe[0] != 'M' || exe[1] != 'Z' || relsig::Sha256Hex(exe) != expected)
+	{
+		DeleteFileW(exeFile.c_str());
+		printf("not updating to %s: the downloaded bhoptools.exe isn't the one its SHA256SUMS lists\n", tag.c_str());
+		const std::string text = "The downloaded " + tag + " isn't the bhoptools.exe its signed SHA256SUMS lists, so it wasn't installed.\n\nStarting the current version (" APP_VERSION ").";
+		MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wtext, 2048);
+		MessageBoxW(NULL, wtext, L"bhoptools update", MB_OK | MB_ICONWARNING | MB_TOPMOST);
+		return false;
+	}
+	if (!MoveFileExW(exeFile.c_str(), fresh.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED))
+	{
+		DeleteFileW(exeFile.c_str());
+		printf("couldn't put the update next to the exe, starting the current version\n");
 		return false;
 	}
 
@@ -1277,16 +1358,23 @@ bool SelfUpdate()
 	}
 
 	const dev::Build* build = dev::Find(builds, tag);
-	const std::string url = build ? dev::AssetUrl(json, *build, "bhoptools-dev.exe") : "";
-	char magic[2] = {};
-	if (!url.empty() && dev::Download(url, true, fresh))
-		std::ifstream(fresh, std::ios::binary).read(magic, 2);
-	if (magic[0] != 'M' || magic[1] != 'Z')
+	dev::Asset asset;
+	if (!build || !dev::FindAsset(json, *build, "bhoptools-dev.exe", asset) || !dev::Download(asset.url, true, fresh))
 	{
 		DeleteFileA(fresh.c_str());
 		printf("downloading %s failed, starting the current version\n", tag.c_str());
 		return false;
 	}
+	const std::string exe = dev::ReadAll(fresh);
+	std::string err = "it isn't an exe";
+	if (exe.size() < 2 || exe[0] != 'M' || exe[1] != 'Z' || !dev::CheckAsset(asset, exe, err))
+	{
+		DeleteFileA(fresh.c_str());
+		printf("not installing %s: %s. Starting the current version\n", tag.c_str(), err.c_str());
+		return false;
+	}
+	if (asset.sha256.empty())
+		printf("%s: the release lists no sha256 for bhoptools-dev.exe, only its size was checked\n", tag.c_str());
 
 	if (!MoveFileExA(self.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING)
 			|| !MoveFileExA(fresh.c_str(), self.c_str(), MOVEFILE_REPLACE_EXISTING))

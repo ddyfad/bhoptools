@@ -5,6 +5,7 @@
 #ifdef BHOPTOOLS_DEV
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -16,6 +17,7 @@
 #include "utils.h"
 #include "sigs.h"
 #include "game_layout.h"
+#include "release_sig.h"
 #include "settings.h"
 #include "update_json.h"
 #include "version.h"
@@ -97,6 +99,18 @@ const char kHeldFile[] = "held_tag.txt";
 
 inline bool Held() { return ReadState(kHeldFile) == CurrentTag(); }
 
+inline std::string ReadAll(const std::string& path)
+{
+	std::string data;
+	if (FILE* f = fopen(path.c_str(), "rb")) {
+		char chunk[4096];
+		size_t n;
+		while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0) data.append(chunk, n);
+		fclose(f);
+	}
+	return data;
+}
+
 // Downloads `url` (a release list or one release) and reads it. Empty on failure.
 inline std::string FetchJson(const std::string& url, const char* name)
 {
@@ -104,14 +118,8 @@ inline std::string FetchJson(const std::string& url, const char* name)
 	if (dir.empty()) return "";
 	MakeDir();
 	const std::string file = dir + "/" + name;
-	std::string json;
-	if (!Download(url, false, file)) return json;
-	if (FILE* f = fopen(file.c_str(), "rb")) {
-		char chunk[4096];
-		size_t n;
-		while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0) json.append(chunk, n);
-		fclose(f);
-	}
+	if (!Download(url, false, file)) return "";
+	const std::string json = ReadAll(file);
 	remove(file.c_str());
 	return json;
 }
@@ -150,18 +158,51 @@ inline const Build* Find(const std::vector<Build>& builds, const std::string& ta
 	return nullptr;
 }
 
-// The API URL of asset `name`, "" if the build has none. A private repo's assets only come
-// through it. An asset's url comes just before its name.
-inline std::string AssetUrl(const std::string& json, const Build& b, const char* name)
+struct Asset {
+	std::string url;     // the API URL: a private repo's assets only come through it
+	long long size = -1;
+	std::string sha256;  // GitHub's digest, empty for assets uploaded before it kept them
+};
+
+// Asset `name` of the build; false if it has none. An asset's url comes just before its name,
+// its size and digest after it and before its browser_download_url.
+inline bool FindAsset(const std::string& json, const Build& b, const char* name, Asset& out)
 {
 	for (size_t pos = b.from;;) {
 		const std::string n = JsonString(json, "name", &pos);
-		if (pos == std::string::npos || pos >= b.to) return "";
+		if (pos == std::string::npos || pos >= b.to) return false;
 		if (n != name) continue;
 		size_t url = json.rfind("\"url\"", pos);
-		if (url == std::string::npos || url < b.from) return "";
-		return JsonString(json, "url", &url);
+		if (url == std::string::npos || url < b.from) return false;
+		out = Asset();
+		out.url = JsonString(json, "url", &url);
+		size_t end = json.find("\"browser_download_url\"", pos);
+		if (end == std::string::npos || end > b.to) end = b.to;
+		const size_t size = json.find("\"size\"", pos);
+		if (size < end) {
+			const size_t colon = json.find(':', size);
+			if (colon < end) out.size = strtoll(json.c_str() + colon + 1, nullptr, 10);
+		}
+		size_t at = pos;
+		const std::string digest = JsonString(json, "digest", &at);
+		if (at < end && digest.compare(0, 7, "sha256:") == 0) out.sha256 = digest.substr(7);
+		return !out.url.empty();
 	}
+}
+
+// Checks a downloaded asset against the size and digest the API listed. Dev builds aren't
+// signed: this catches a broken or swapped download, not someone who can publish dev releases.
+inline bool CheckAsset(const Asset& a, const std::string& data, std::string& err)
+{
+	if (a.size >= 0 && (long long)data.size() != a.size) {
+		err = "the download is " + std::to_string(data.size()) + " bytes, the release lists " + std::to_string(a.size);
+		return false;
+	}
+	if (!a.sha256.empty() && relsig::Sha256Hex(data) != a.sha256) {
+		err = "the download's sha256 isn't the one the release lists";
+		return false;
+	}
+	return true;
 }
 
 // The newest build, or "" when it's the one running; `log` gets the notes of every newer one.
