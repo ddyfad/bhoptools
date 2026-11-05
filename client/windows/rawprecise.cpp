@@ -230,8 +230,15 @@ ConCommandX g_cmds[2];
 
 }  // namespace
 
+#ifdef BHOPTOOLS_NO_RAWPRECISE
+const bool kLeftOut = true;
+#else
+const bool kLeftOut = false;
+#endif
+
 void Init(double (*platFloatTime)())
 {
+	if (kLeftOut) return;
 	g_plat = platFloatTime;
 	LARGE_INTEGER f;
 	QueryPerformanceFrequency(&f);
@@ -250,12 +257,12 @@ void Init(double (*platFloatTime)())
 
 void Attach()
 {
-	DetourAttach(&(PVOID&)oRegisterRawInputDevices, Hooked_RegisterRawInputDevices);
+	if (!kLeftOut) DetourAttach(&(PVOID&)oRegisterRawInputDevices, Hooked_RegisterRawInputDevices);
 }
 
 void Detach()
 {
-	DetourDetach(&(PVOID&)oRegisterRawInputDevices, Hooked_RegisterRawInputDevices);
+	if (!kLeftOut) DetourDetach(&(PVOID&)oRegisterRawInputDevices, Hooked_RegisterRawInputDevices);
 }
 
 void Shutdown()
@@ -363,7 +370,7 @@ void Take(int& dx, int& dy, double split)
 void RegisterCommands()
 {
 	static bool done;
-	if (done) return;
+	if (done || kLeftOut) return;
 	done = true;
 	void* cvar = CreateInterfaceIn(VSTDLIB_MODULE, "VEngineCvar004");
 	void* echo = cvar ? VFunc<void* (*)(void*, const char*)>(cvar, VT_Cvar_FindBase)(cvar, "echo") : nullptr;

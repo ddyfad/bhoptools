@@ -29,6 +29,10 @@ on:
         description: "Step 1: release notes, shown in the update popup. Type \n for a new line"
         required: false
         default: ""
+      leave_out:
+        description: "Step 1: features to build the public release without, space separated (e.g. rawprecise)"
+        required: false
+        default: ""
       required_update:
         description: "Step 1: required update, installed for everyone, even those who chose never to update"
         type: boolean
@@ -59,6 +63,7 @@ jobs:
       sha: ${{ steps.prepare.outputs.sha }}
       version: ${{ steps.prepare.outputs.version }}
       variants: ${{ steps.prepare.outputs.variants }}
+      defines: ${{ steps.prepare.outputs.defines }}
       # push, build (promote step 1) or publish (step 2)
       mode: ${{ steps.prepare.outputs.mode }}
     steps:
@@ -74,6 +79,7 @@ jobs:
           GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
           DEV_TAG: ${{ inputs.dev_tag }}
           VERSION: ${{ inputs.version }}
+          LEAVE_OUT: ${{ inputs.leave_out }}
           BUILD_RUN: ${{ inputs.build_run }}
           HAVE_SIGNATURE: ${{ inputs.sums_signature != '' }}
         run: |
@@ -111,6 +117,15 @@ jobs:
               exit 1
             fi
           fi
+          # Each name becomes BHOPTOOLS_NO_<NAME>, which the code for that feature has to check.
+          defines=""
+          for f in ${LEAVE_OUT//,/ }; do
+            [[ "$f" =~ ^[a-z0-9]+$ ]] || { echo "::error::leave_out: \"$f\" isn't a feature name"; exit 1; }
+            d="BHOPTOOLS_NO_${f^^}"
+            git grep -q "$d" "$sha" -- client || { echo "::error::leave_out: nothing in the client checks $d"; exit 1; }
+            defines="$defines $d"
+          done
+          echo "defines=${defines# }" >> "$GITHUB_OUTPUT"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo 'variants=["public"]' >> "$GITHUB_OUTPUT"
@@ -141,9 +156,12 @@ jobs:
 
       - name: Build Release x64
         shell: pwsh
+        env:
+          DEFINES: ${{ needs.prepare.outputs.defines }}
         run: |
+          # cl.exe takes extra options from CL.
+          $env:CL = (($env:DEFINES -split ' ') | Where-Object { $_ } | ForEach-Object { "/D$_" }) -join ' '
           if ('${{ matrix.variant }}' -eq 'dev') {
-            # cl.exe takes extra options from CL.
             $env:CL = '/DBHOPTOOLS_DEV'
             Copy-Item client/windows/bhoptools-dev.ico client/windows/bhoptools.ico -Force
           }
@@ -180,11 +198,15 @@ jobs:
         run: echo "#define APP_VERSION \"$APP_VERSION\"" > client/shared/version.h
 
       - name: Build
+        env:
+          DEFINES: ${{ needs.prepare.outputs.defines }}
         run: |
           if [ "${{ matrix.variant }}" = dev ]; then
             make -C client/linux CXX="g++ -DBHOPTOOLS_DEV" SO_NAME=bhoptools-dev.so EXE_NAME=bhoptools-dev all check-glibc
           else
-            make -C client/linux all check-glibc
+            flags=""
+            for d in $DEFINES; do flags="$flags -D$d"; done
+            make -C client/linux CXX="g++$flags" all check-glibc
           fi
 
       - name: Release signature tests

@@ -106,6 +106,10 @@ in between. Nothing goes public until the second run has checked the signature.
 gh workflow run staging.yml -R ddyfad/bhoptools-staging --ref main -f dev_tag=dev-48 -f version=1.13 -f notes="what changed" -f required_update=false -f prerelease=false
 ```
 
+`-f leave_out=rawprecise` builds the public files without a feature (space separated for more). Each
+name `x` is the define `BHOPTOOLS_NO_X`, and the run fails if no client code checks it. The dev
+client always has everything.
+
 It:
 
 1. checks the inputs, that `1.13` isn't released yet, and that the public `main` branch is
