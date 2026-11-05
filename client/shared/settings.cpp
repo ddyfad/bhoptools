@@ -35,6 +35,7 @@ const Field kFields[] = {
 	{ "hudkeys",   &Settings::hudkeys },
 	{ "jsframe",   &Settings::jsframe },
 	{ "chatglyphs", &Settings::chatglyphs },
+	{ "pollfix",   &Settings::pollfix },
 };
 
 }

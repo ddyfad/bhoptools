@@ -27,6 +27,7 @@
 #include "options_tab.h"
 #include "spectate.h"
 #include "game_layout.h"
+#include "pollfix.h"
 
 typedef void(__thiscall* CHostState_OnClientConnectedFn)(void*);
 CHostState_OnClientConnectedFn oCHostState_OnClientConnected;
@@ -81,15 +82,17 @@ void AddRawMouse(const RAWINPUT* ri)
 	{
 		*m_mouseRawAccumX += ri->data.mouse.lLastX;
 		*m_mouseRawAccumY += ri->data.mouse.lLastY;
+		pollfix::OnRawMouse(ri->data.mouse);
 	}
 }
 
 // One WM_INPUT per HID report means 8000 trips a second through the window procs at 8kHz.
 // GetRawInputBuffer reads everything queued and removes those WM_INPUT messages as well.
-bool DrainRawInput()
+// Returns the reports read.
+int DrainRawInput()
 {
 	alignas(8) static BYTE buf[64 * sizeof(RAWINPUT)];
-	bool any = false;
+	int total = 0;
 	for (;;)
 	{
 		UINT size = sizeof(buf);
@@ -99,9 +102,26 @@ bool DrainRawInput()
 		RAWINPUT* ri = (RAWINPUT*)buf;
 		for (UINT i = 0; i < n; i++, ri = NEXTRAWINPUTBLOCK(ri))
 			AddRawMouse(ri);
-		any = true;
+		total += n;
 	}
-	return any;
+	pollfix::CountRaw(total);
+	return total;
+}
+
+// Every mouse report reaches AddRawMouse: Hooked_WindowProc takes WM_INPUT itself on this condition.
+bool RawPathActive()
+{
+	return g_rawInput2Ready && *m_bRawInputSupported && m_rawinput_cvar && *m_rawinput_cvar != 0;
+}
+
+// The batch read the high polling rate fix does at the start of each pump, in place of the
+// WM_INPUT messages it no longer retrieves.
+int DrainRawInputForPump()
+{
+	const int n = DrainRawInput();
+	if (n && Plat_FloatTime)
+		m_mouseSampleTime = Plat_FloatTime();
+	return n;
 }
 
 bool GetRawMouseAccumulators(int& accumX, int& accumY, double frame_split)
@@ -237,6 +257,7 @@ void Cmd_DevBuilds(const CCommandX&)
 
 LRESULT __fastcall Hooked_WindowProc(void* thisptr, HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
+	pollfix::OnWindowMessage(hwnd, uMsg);
 	// Does what CInputSystem::WindowProc would (add lLastX/Y to its accumulators), then takes the
 	// rest of the queue in one go. DefWindowProc does the WM_INPUT cleanup the docs ask for.
 	if (uMsg == WM_INPUT && g_rawInput2Ready && *m_bRawInputSupported)
@@ -254,6 +275,7 @@ LRESULT __fastcall Hooked_WindowProc(void* thisptr, HWND hwnd, UINT uMsg, WPARAM
 #ifdef BHOPTOOLS_DEV
 	dev::RegisterCommands(Cmd_DevInstall, Cmd_DevBuilds);
 #endif
+	pollfix::RegisterCommands();
 	// GameUI's vtables are patched on the game thread; a failed look is a few ms of scanning, so once a second.
 	static bool optionsDone = false;
 	static ULONGLONG optionsNext = 0;
@@ -773,6 +795,8 @@ DWORD InjectionEntryPoint(DWORD processID)
 	{
 		CoreLog("m_rawinput 2: disabled, see the missing signature above");
 	}
+	// Needs only the accumulators: it serves m_rawinput 1 without the interpolation too.
+	pollfix::Init(m_mouseRawAccumX ? DrainRawInputForPump : nullptr, RawPathActive);
 
 	// The LEA at +25 loads gHUD.
 	auto ClientModeShared_Init = FindPatternLogged("client.dll", "ClientModeShared::Init", "48 89 5C 24 ? 48 89 74 24 ? 57 48 83 EC 30 48 8B F1 48 8D 15");
@@ -900,6 +924,7 @@ DWORD InjectionEntryPoint(DWORD processID)
 		DetourAttach(&(PVOID&)oControllerMove, Hooked_ControllerMove);
 		DetourAttach(&(PVOID&)oIn_SetSampleTime, Hooked_IN_SetSampleTime);
 	}
+	pollfix::Attach();
 	if (LONG err = DetourTransactionCommit())
 		CoreLog("DetourTransactionCommit failed (%ld), no hooks installed", err);
 	else if (fastdlReady)
@@ -1003,6 +1028,7 @@ DWORD InjectionEntryPoint(DWORD processID)
 		DetourDetach(&(PVOID&)oControllerMove, Hooked_ControllerMove);
 		DetourDetach(&(PVOID&)oIn_SetSampleTime, Hooked_IN_SetSampleTime);
 	}
+	pollfix::Detach();
 	DetourTransactionCommit();
 
 	ExitThread(0);

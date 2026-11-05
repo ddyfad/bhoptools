@@ -23,6 +23,7 @@
     <ClCompile Include="Detours\src\disasm.cpp" />
     <ClCompile Include="Detours\src\modules.cpp" />
     <ClCompile Include="main.cpp" />
+    <ClCompile Include="pollfix.cpp" />
     <ClCompile Include="..\shared\teleport_predict.cpp" />
     <ClCompile Include="..\shared\speedo.cpp" />
     <ClCompile Include="..\shared\jumpstats.cpp" />

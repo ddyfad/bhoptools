@@ -56,6 +56,9 @@ const Row kRows[] = {
 	{ &Settings::predict,   nullptr,            L"prediction" },
 	{ &Settings::speedo,    &Settings::hudkeys, L"clientside hud fixes" },
 	{ &Settings::jsframe,   nullptr,            L"jumpstats trainers every frame (off: every tick)" },
+#ifdef _WIN32
+	{ &Settings::pollfix,   nullptr,            L"high polling rate fix (4-8 kHz mice: no fps loss while moving the mouse)" },
+#endif
 };
 const int kRowCount = sizeof(kRows) / sizeof(kRows[0]);
 const int kLeft = 20, kTop = 20, kRowTall = 28, kBox = 14, kWidth = 560;
