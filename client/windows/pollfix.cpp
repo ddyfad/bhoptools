@@ -114,9 +114,12 @@ void ReleaseButtons()
 	}
 }
 
-// Looking around rather than in a menu or the console. CS:S hides the cursor then; it never clips it.
+// Looking around rather than in a menu, the console or chat: what CInput::MouseMove asks before mouselook. The
+// Windows cursor isn't enough: chat wants one, but only shows it once a cursor message comes, which no-legacy stops.
 bool InGame()
 {
+	static void* surface = CreateInterfaceIn(SURFACE_MODULE, "VGUI_Surface030");
+	if (surface) return !VFunc<bool (*)(void*)>(surface, VT_Surface_IsCursorVisible)(surface);
 	CURSORINFO ci = { sizeof(ci) };
 	return GetCursorInfo(&ci) && (!(ci.flags & CURSOR_SHOWING) || !ci.hCursor);
 }

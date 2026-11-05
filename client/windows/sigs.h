@@ -134,6 +134,7 @@ static const int VT_Surface_DrawSetTextFont  = 17;
 static const int VT_Surface_DrawSetTextColor = 19; // (int r, g, b, a)
 static const int VT_Surface_DrawSetTextPos   = 20;
 static const int VT_Surface_DrawPrintText    = 22; // (const wchar_t*, int len, int type)
+static const int VT_Surface_IsCursorVisible  = 53;
 static const int VT_Surface_CreateFont       = 66;
 static const int VT_Surface_SetFontGlyphSet  = 67; // (HFont, name, tall, weight, blur, scanlines, flags, rangeMin, rangeMax)
 static const char RTTI_OptionsSubMultiplayer[] = ".?AVCOptionsSubMultiplayer@@";
