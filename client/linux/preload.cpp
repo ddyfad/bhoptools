@@ -1346,7 +1346,7 @@ static void* UpdateThread(void*)
 		CoreLog("no GitHub token, so no dev build updates: save a read-only token for ddyfad/bhoptools-staging in %s (STAGING.md says how)", dev::TokenPath().c_str());
 		return nullptr;
 	}
-	const std::string json = dev::FetchJson(DEV_API "?per_page=20", "release.json");
+	const std::string json = dev::FetchJson(DEV_API "?per_page=50", "release.json");
 	if (json.empty()) {
 		CoreLog("couldn't fetch the dev builds; check the token in %s", dev::TokenPath().c_str());
 		return nullptr;

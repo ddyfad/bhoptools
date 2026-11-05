@@ -1406,7 +1406,7 @@ bool SelfUpdate()
 	if (!wanted.empty())
 		dev::WriteState(dev::kInstallFile, "");
 
-	const std::string json = dev::FetchJson(wanted.empty() ? std::string(DEV_API "?per_page=20") : DEV_API "/tags/" + wanted, "release.json");
+	const std::string json = dev::FetchJson(wanted.empty() ? std::string(DEV_API "?per_page=50") : DEV_API "/tags/" + wanted, "release.json");
 	const std::vector<dev::Build> builds = dev::Builds(json);
 	std::string tag;
 	if (!wanted.empty())

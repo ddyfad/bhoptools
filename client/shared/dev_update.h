@@ -4,6 +4,7 @@
 #pragma once
 #ifdef BHOPTOOLS_DEV
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -148,6 +149,8 @@ inline std::vector<Build> Builds(const std::string& json)
 		if (b.tag.compare(0, 4, "dev-") == 0) out.push_back(b);
 		pos = b.to;
 	}
+	// GitHub's order isn't by build number (dev-12 came after dev-2), so newest first by number.
+	std::stable_sort(out.begin(), out.end(), [](const Build& a, const Build& b) { return atoi(a.tag.c_str() + 4) > atoi(b.tag.c_str() + 4); });
 	return out;
 }
 
@@ -232,7 +235,7 @@ inline bool CheckToken()
 inline void PrintBuilds()
 {
 	if (!CheckToken()) return;
-	const std::string json = FetchJson(DEV_API "?per_page=20", "builds.json");
+	const std::string json = FetchJson(DEV_API "?per_page=50", "builds.json");
 	const std::vector<Build> builds = Builds(json);
 	if (builds.empty()) {
 		CoreLog("%s", json.empty() ? "couldn't fetch the dev builds (check the token)" : "no dev builds");
