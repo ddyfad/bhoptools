@@ -26,7 +26,7 @@ on:
         required: false
         default: ""
       notes:
-        description: "Step 1: release notes, shown in the update popup"
+        description: "Step 1: release notes, shown in the update popup. Type \n for a new line"
         required: false
         default: ""
       required_update:
@@ -316,7 +316,8 @@ jobs:
           set -e
           {
             if [ "$REQUIRED" = true ]; then echo '[required]'; else echo; fi
-            printf '%s\n' "$NOTES"
+            # the web form is one line, so a typed \n is a new line
+            printf '%s\n' "${NOTES//'\n'/$'\n'}"
             cat <<'EOF'
 
           ---
