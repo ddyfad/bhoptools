@@ -87,7 +87,7 @@ bool InstallHudSlots()
 
 const char* g_watchName;
 int    g_watchMsg = -1;
-void (*g_watchFn)(const BfRead&);
+bool (*g_watchFn)(const BfRead&);
 
 int    g_speed2d[kHistory], g_speed3d[kHistory];
 int    g_count, g_next;
@@ -307,7 +307,7 @@ bool Hooked_Dispatch(void* self, int type, BfRead* msg)
 	if (g_textMsg < 0) g_textMsg = MessageId("TextMsg");
 	if (g_hudSlots && g_hudMsg < 0) g_hudMsg = MessageId("HudMsg");
 	if (g_watchFn && g_watchMsg < 0) g_watchMsg = MessageId(g_watchName);
-	if (msg && g_watchFn && type == g_watchMsg) g_watchFn(*msg);
+	if (msg && g_watchFn && type == g_watchMsg && g_watchFn(*msg)) return true;
 	if (msg && g_hintMsg >= 0 && type == g_hintMsg && OnHint(*msg)) return true;
 	if (msg && g_textMsg >= 0 && type == g_textMsg && OnTextMsg(*msg)) return true;
 	return CallOriginal(self, type, msg);
@@ -415,7 +415,7 @@ DispatchUserMessageFn OriginalDispatch()
 	return g_orig;
 }
 
-void Watch(const char* name, void (*fn)(const BfRead&))
+void Watch(const char* name, bool (*fn)(const BfRead&))
 {
 	g_watchName = name;
 	g_watchMsg = -1;

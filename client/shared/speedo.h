@@ -27,7 +27,8 @@ void Detach();
 
 DispatchUserMessageFn OriginalDispatch();
 
-void Watch(const char* name, void (*fn)(const BfRead&));
+// fn returning true keeps the message from the game.
+void Watch(const char* name, bool (*fn)(const BfRead&));
 
 // The watched message's id, -1 until one has been dispatched.
 int WatchedMessage();

@@ -255,6 +255,8 @@ int    g_cpShapeLen;
 int    g_cpShapeLines;
 // When key 1 last sent a save: shavit's menu doesn't print the chat line sm_save does.
 double g_menuSaveAt = -1;
+// When a checkpoint menu drawn before the server ran a key we predicted was kept off the screen, -1 for none.
+double g_menuHeldAt = -1;
 
 speedo::DispatchUserMessageFn g_dispatch;
 void*  g_client;
@@ -441,6 +443,7 @@ void ResetSession()
 	g_shownLen = 0;
 	g_cpShapeLen = 0;
 	g_menuSaveAt = -1;
+	g_menuHeldAt = -1;
 	g_session = (int)((long long)(MonotonicSeconds() * 1000.0) & 0x7fffffff);
 	if (!g_session) g_session = 1;
 	js::Reset(g_session);
@@ -1305,15 +1308,26 @@ void Cmd_Menu(const CCommandX& c)
 	bool on = false;
 	g_menuTeleOn = MenuItemLine(g_menuBase, g_menuPrefix, 2, &on) >= 0 && on;
 	// Drawn before the server ran a prev/next or save we predicted, like shavit's twice-a-second redraw.
-	RedrawMenu();
+	// A menu held back shows as the server drew it once nothing predicted is left to draw over it.
+	if (!RedrawMenu() && g_menuHeldAt >= 0) SendMenu(g_menuBase, g_menuBaseLen, g_menuBaseKeys);
+	g_menuHeldAt = -1;
 }
 
-// ShowMenu: keys (short), time (char), more to come (byte), text.
-void OnShowMenu(const BfRead& msg)
+bool MenuPredicted()
 {
-	if (msg.curBit & 7) return;
+	for (int i = 0; i < g_slotCount; ++i)
+		if (g_slots[i].key > g_menuCmd) return true;
+	return false;
+}
+
+// ShowMenu: keys (short), time (char), more to come (byte), text. True keeps it off the screen.
+bool OnShowMenu(const BfRead& msg)
+{
+	if (msg.curBit & 7) return false;
 	const int at = msg.curBit / 8;
-	if (at + 4 > msg.bytes) return;
+	if (at + 4 > msg.bytes) return false;
+	const bool single = !g_menuMore;  // a part of a longer menu has already reached the screen
+	const bool baseOk = g_menuBaseOk;
 	if (!g_menuMore) {
 		g_menuLen = 0;
 		g_menuWasCp = g_cpMenu;
@@ -1324,25 +1338,36 @@ void OnShowMenu(const BfRead& msg)
 	g_menuMore = msg.data[at + 3] != 0;
 	g_menuBaseOk = false;
 	g_cpMenu = false;
-	if (g_menuMore) return;
+	if (g_menuMore) return false;
 	g_menuSlots = msg.data[at] | (msg.data[at + 1] << 8);
 	g_menuTime = msg.data[at + 2];
 	g_menuShown = MonotonicSeconds();
-	memcpy(g_shown, g_menuText, g_menuLen);
-	g_shownLen = g_menuLen;
-	g_shownKeys = g_menuSlots;
 	// The same checkpoint menu with other numbers: keys stay predicted until its bhoptools_menu says
 	// what the numbers are, and a predicted key shows this one again meanwhile.
 	char shape[sizeof(g_cpShape)];
-	if (g_menuWasCp && g_cpShapeLen > 0 && MenuShape(g_menuText, g_menuLen, g_cpShapeLines, shape, sizeof(shape)) == g_cpShapeLen
-			&& memcmp(shape, g_cpShape, g_cpShapeLen) == 0) {
+	const bool sameCp = g_menuWasCp && g_cpShapeLen > 0 && MenuShape(g_menuText, g_menuLen, g_cpShapeLines, shape, sizeof(shape)) == g_cpShapeLen
+		&& memcmp(shape, g_cpShape, g_cpShapeLen) == 0;
+	// Drawn before the server ran a key we predicted: the screen already shows what the key did, so this stays off
+	// it until its bhoptools_menu says whether it's still behind, instead of the old numbers flashing back.
+	if (sameCp && single && g_shownLen > 0 && MenuPredicted()) {
+		g_cpMenu = true;
+		g_menuBaseOk = baseOk;
+		if (g_menuHeldAt < 0) g_menuHeldAt = g_menuShown;
+		return true;
+	}
+	g_menuHeldAt = -1;
+	memcpy(g_shown, g_menuText, g_menuLen);
+	g_shownLen = g_menuLen;
+	g_shownKeys = g_menuSlots;
+	if (sameCp) {
 		g_cpMenu = true;
 		bool on = false;
 		g_menuTeleOn = MenuItemLine(g_menuText, g_menuLen, 2, &on) >= 0 && on;
-		return;
+		return false;
 	}
 	g_menuKeys = 0;
 	g_menuItems[0] = '\0';
+	return false;
 }
 
 void Cmd_Save(const CCommandX& c) { Checkpoint(c, IMPULSE_SAVE); }
@@ -1581,6 +1606,11 @@ void MaybeHello()
 {
 	const double now = MonotonicSeconds();
 	if (!g_session) ResetSession();
+	// A held-back menu whose bhoptools_menu never came.
+	if (g_menuHeldAt >= 0 && now - g_menuHeldAt >= kMenuWindow && !g_menuMore) {
+		g_menuHeldAt = -1;
+		SendMenu(g_menuText, g_menuLen, g_menuSlots);
+	}
 	if (g_caps && g_syncWanted && now - g_syncAsked >= kHelloInterval) {
 		g_syncAsked = now;
 		char cmd[48];
