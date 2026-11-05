@@ -324,6 +324,7 @@ void __fastcall Hooked_IN_SetSampleTime(void* thisptr, float frametime)
 
 	oIn_SetSampleTime(thisptr, frametime);
 	js::OnFrame();
+	pollfix::OnFrame();
 }
 
 void __fastcall Hooked_CHostState_OnClientConnected(void* thisptr)

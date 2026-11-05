@@ -45,7 +45,7 @@ struct Stats {
 	unsigned procInput, procMouseMove, procHitTest, procSetCursor, procOther;
 	unsigned drains, rawReports;
 	unsigned noLegacyPumps, reregisters, postedButtons;
-	unsigned offNotFront, offNoRaw, offCursor;
+	unsigned offNotFront, offNoRaw, offCursor, offNoPump;
 	Shape shapes[8];
 	int shapeCount;
 };
@@ -58,6 +58,7 @@ bool g_inPump;
 bool g_filtering;
 LONGLONG g_pumpStart;
 bool g_tookMouseMove, g_tookNcMouseMove, g_tookUnfiltered;
+bool g_updatedSinceFrame;  // a pump ran UpdateNoLegacy since the last OnFrame
 
 // No-legacy mode: the mouse registered with RIDEV_NOLEGACY while looking around, so Windows stops
 // making a WM_MOUSEMOVE (with its WM_NCHITTEST and WM_SETCURSOR) for every report. Filtering the
@@ -119,12 +120,15 @@ bool InGame()
 	return GetCursorInfo(&ci) && (!(ci.flags & CURSOR_SHOWING) || !ci.hCursor);
 }
 
-// Once per pump: no-legacy only while the game is in front and looking around (menus need the
-// cursor messages) and our raw path sees every report (it posts the buttons).
-void UpdateNoLegacy()
+// Once per pump, or per frame when no pump ran: no-legacy only while the game is in front and
+// looking around (menus need the cursor messages) and our raw path sees every report (it posts the
+// buttons). pumpSeen false (no recognised pump lately) turns it off.
+void UpdateNoLegacy(bool pumpSeen)
 {
 	bool want = false;
 	if (!settings::Get().pollfix || !g_noLegacyWanted || !g_gameWindow) {
+	} else if (!pumpSeen) {
+		g_s.offNoPump++;
 	} else if (GetForegroundWindow() != g_gameWindow) {
 		g_s.offNotFront++;
 	} else if (!g_rawActive || !g_rawActive()) {
@@ -208,7 +212,8 @@ BOOL Pump(PeekMessageFn fn, LPMSG msg, HWND hwnd, UINT flags)
 			g_drain();
 		}
 		// After the drain: what's queued arrived under the old registration and is handled by it.
-		UpdateNoLegacy();
+		UpdateNoLegacy(true);
+		g_updatedSinceFrame = true;
 		if (g_noLegacyOn) g_s.noLegacyPumps++;
 	}
 	BOOL r;
@@ -299,8 +304,8 @@ void Cmd_PumpStats(const CCommandX&)
 	CoreLog("  no-legacy %s: on for %u of %u pumps, %u re-registrations, %u buttons/wheel posted",
 		g_noLegacyWanted && settings::Get().pollfix ? "wanted" : "off", g_s.noLegacyPumps, g_s.pumps, g_s.reregisters, g_s.postedButtons);
 	if (g_noLegacyWanted && settings::Get().pollfix)
-		CoreLog("  no-legacy off because: %u not in front, %u raw input not active, %u in a menu or the console",
-			g_s.offNotFront, g_s.offNoRaw, g_s.offCursor);
+		CoreLog("  no-legacy off because: %u not in front, %u raw input not active, %u in a menu or the console, %u no pump seen",
+			g_s.offNotFront, g_s.offNoRaw, g_s.offCursor, g_s.offNoPump);
 	for (int i = 0; i < g_s.shapeCount; ++i) {
 		const Shape& s = g_s.shapes[i];
 		CoreLog("  PeekMessage(hwnd=%p, %u..%u, flags 0x%x) from %s: %u calls", s.hwnd, s.min, s.max, s.flags, s.from ? s.from : "elsewhere", s.count);
@@ -381,6 +386,18 @@ void OnWindowMessage(HWND hwnd, UINT msg)
 	else if (msg == WM_NCHITTEST) g_s.procHitTest++;
 	else if (msg == WM_SETCURSOR) g_s.procSetCursor++;
 	else g_s.procOther++;
+}
+
+// Another PeekMessage hook installed after ours (an overlay) hides the pump's caller, and then
+// nothing would re-evaluate no-legacy: left on in a menu, there's no cursor.
+void OnFrame()
+{
+	if (GetCurrentThreadId() != g_gameThread) return;
+	if (g_updatedSinceFrame) {
+		g_updatedSinceFrame = false;
+		return;
+	}
+	UpdateNoLegacy(g_pumpStart && (Now() - g_pumpStart) * 10 < g_freq);
 }
 
 void OnRawMouse(const RAWMOUSE& m)
