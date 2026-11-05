@@ -77,7 +77,8 @@ const int kClientJumpstats4 = 1 << 23;  // the prestrafe trainer is the per-tick
 const int kClientJumpstats5 = 1 << 24;  // the prestrafe trainer is the top speed each tick is on pace for
 const int kClientJumpstats6 = 1 << 25;  // the gain modes and the compact trainers
 // 1 << 26 was the reversal close-up, since taken out of the plugin
-const int kClientJumpstats8 = 1 << 27;  // linear gain and the offsets' slow ticks
+const int kClientJumpstats8 = 1 << 27;  // linear gain
+const int kClientJumpstats9 = 1 << 28;  // the slow ticks HUD
 const int kClientHold = 1 << 20;
 const int kMenuKeySave = 1 << 0;     // bhoptools_menu keys
 const int kMenuKeyTele = 1 << 1;
@@ -187,7 +188,7 @@ int32_t g_frameX[kFrameBatch], g_frameY[kFrameBatch];
 int    g_capsCmd;        // saves after this command get acked
 int    g_serverFlags;
 bool   g_lastKz;
-int    g_clientFlags = kClientMenus | kClientRngfix | kClientAutobhop | kClientNoclip | kClientMove | kClientUntouch | kClientMsf | kClientState | kClientCpset | kClientKeys | kClientRestart | kClientAutosync | kClientZones | kClientTeleportView | kClientMenuSound | kClientJumpstats | kClientJumpstats2 | kClientJumpstats3 | kClientJumpstats4 | kClientJumpstats5 | kClientJumpstats6 | kClientJumpstats8 | kClientHold;
+int    g_clientFlags = kClientMenus | kClientRngfix | kClientAutobhop | kClientNoclip | kClientMove | kClientUntouch | kClientMsf | kClientState | kClientCpset | kClientKeys | kClientRestart | kClientAutosync | kClientZones | kClientTeleportView | kClientMenuSound | kClientJumpstats | kClientJumpstats2 | kClientJumpstats3 | kClientJumpstats4 | kClientJumpstats5 | kClientJumpstats6 | kClientJumpstats8 | kClientJumpstats9 | kClientHold;
 NcLog  g_noclip;
 int    g_noclipAllow = NC_ALLOW_ALL;
 // Servers without bhoptools_cpset restore both.
@@ -1541,7 +1542,7 @@ int CommandKey(void* player, void* mv)
 int HelloFlags()
 {
 	int flags = g_on ? g_clientFlags : g_clientFlags & ~kClientTriggers;
-	if (!settings::Get().speedo) flags &= ~(kClientJumpstats | kClientJumpstats2 | kClientJumpstats3 | kClientJumpstats4 | kClientJumpstats5 | kClientJumpstats6 | kClientJumpstats8);
+	if (!settings::Get().speedo) flags &= ~(kClientJumpstats | kClientJumpstats2 | kClientJumpstats3 | kClientJumpstats4 | kClientJumpstats5 | kClientJumpstats6 | kClientJumpstats8 | kClientJumpstats9);
 	return flags;
 }
 

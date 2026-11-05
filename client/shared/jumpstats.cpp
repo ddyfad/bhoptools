@@ -25,7 +25,7 @@ namespace {
 // bgs-jumpstats' settings indexes and bits (jumpstat/settings.sp)
 enum { GainReallyBad, GainBad, GainMeh, GainGood, GainReallyGood, Bools, Usage, Positions_X, Positions_Y,
 	Positions2_X, Positions2_Y, TrainerSpeed, JhudCutOff, JhudSpeedColorsJump, JhudHidden, Bools2, kSettings };
-enum { HudJhud, HudTrainer, HudOffset, HudSpeedometer, HudFjt, HudShowKeys, HudPreStrafeTrainer };
+enum { HudJhud, HudTrainer, HudOffset, HudSpeedometer, HudFjt, HudShowKeys, HudPreStrafeTrainer, HudSlowTicks };
 enum { Trainer_Slow, Trainer_Medium, Trainer_Fast };
 
 const uint32_t JHUD_ENABLED = 1u << 0, JHUD_JSS = 1u << 1, JHUD_SYNC = 1u << 2, JHUD_GMOD_JSS = 1u << 3,
@@ -38,7 +38,7 @@ const uint32_t JHUD_ENABLED = 1u << 0, JHUD_JSS = 1u << 1, JHUD_SYNC = 1u << 2, 
 	SHOWYAWS_ENABLED = 1u << 29, SPEEDOMETER_SMALL_VELOCITY = 1u << 30, SPEEDOMETER_COMPARISON = 1u << 31;
 const int JHUD_HIDE_JUMP = 1 << 0, JHUD_HIDE_SPEED = 1 << 1, JHUD_HIDE_GAIN = 1 << 2;
 // Bools2. MMOD_GAIN shows the mmod gain, BOTH_GAIN "old / mmod", LINEAR_GAIN the mmod gain on the old gain's scale,
-// none of them the old gain. Bits 5-8 are the compact trainers' colour, bits 10-11 the offsets' slow ticks: 0 off,
+// none of them the old gain. Bits 5-8 are the compact trainers' colour, bits 10-11 the slow ticks HUD: 0 off,
 // 1-3 ticks per strafe under 25/50/75% jss.
 const int PRESTRAFETRAINER_ENABLED = 1 << 0, MMOD_GAIN = 1 << 1, BOTH_GAIN = 1 << 2, TRAINER_COMPACT = 1 << 3,
 	TRAINER_PCT_BELOW = 1 << 4, TRAINER_COLOUR_SHIFT = 5, PRETRAINER_COMPACT = 1 << 9, OFFSETS_SLOW_SHIFT = 10,
@@ -373,8 +373,8 @@ int OffsetColorIdx(int offset)
 	return GainReallyBad;
 }
 
-// Ticks this strafe turning slower than 25/50/75% of the best turn. The plugin's console dump of them stays
-// server-side: it prints for every player, client-drawn or not.
+// Ticks this strafe turning slower than 25/50/75% of the best turn, for the slow ticks HUD. The plugin's console dump
+// of them with the offsets stays server-side: it prints for every player, client-drawn or not.
 int g_slowTicks[3];
 
 void OffsetTick(bool inbhop, float jss)
@@ -385,22 +385,47 @@ void OffsetTick(bool inbhop, float jss)
 	}
 }
 
+// pretrainer.sp's PreStrafeTrainer_Group: the first group whose own HUD is off, else 5
+int PreTrainerGroup()
+{
+	return !Has(TRAINER_ENABLED) ? 0 : !Has(JHUD_ENABLED) ? 1 : !Has(OFFSETS_ENABLED) ? 2 : !Has(SHOWKEYS_ENABLED) ? 3 : !Has(SPEEDOMETER_ENABLED) ? 4 : 5;
+}
+
+// offsets.sp's SlowTicks_Group: a group none of the HUDs drawn in the air is on, one the prestrafe trainer doesn't
+// use if there is one, else the prestrafe trainer's, which only draws on the ground. Everything we draw comes as
+// sent, so nothing has been moved.
+int SlowTicksGroup()
+{
+	const bool air[6] = { Has(TRAINER_ENABLED), Has(JHUD_ENABLED), Has(OFFSETS_ENABLED), Has(SHOWKEYS_ENABLED),
+		Has(SPEEDOMETER_ENABLED | SHOWYAWS_ENABLED), false };
+	const int ground = PreTrainerGroup();
+	for (int i = 0; i < 6; ++i)
+		if (!air[i] && i != ground) return i;
+	return ground;
+}
+
 void Offset(int offset, bool overlap, bool nopress)
 {
-	if (!Cvar(JSCV_OFFSET)) return;
-	g_repeatedOffsets = g_lastOffset == offset ? g_repeatedOffsets + 1 : 0;
-	g_offsetHistory[g_currentFrame] = offset;
-	if (++g_currentFrame >= OFFSETS_MAX_FRAME) g_currentFrame = 0;
 	int slow[3];
 	for (int i = 0; i < 3; ++i) {
 		slow[i] = g_slowTicks[i];
 		g_slowTicks[i] = 0;
 	}
+	// the slow ticks HUD: this strafe's ticks under the threshold, coloured by how many
+	const int mode = (g_set[Bools2] >> OFFSETS_SLOW_SHIFT) & 3;
+	if (mode > 0) {
+		const int count = slow[mode - 1];
+		const int idx = count <= 0 ? GainReallyGood : count == 1 ? GainGood : count == 2 ? GainMeh : count == 3 ? GainBad : GainReallyBad;
+		ShowHud(HudSlowTicks, Color(idx), 0.5f, SlowTicksGroup(), Fmt("%d under %d%%", count, mode * 25));
+	}
+
+	if (!Cvar(JSCV_OFFSET)) return;
+	g_repeatedOffsets = g_lastOffset == offset ? g_repeatedOffsets + 1 : 0;
+	g_offsetHistory[g_currentFrame] = offset;
+	if (++g_currentFrame >= OFFSETS_MAX_FRAME) g_currentFrame = 0;
 
 	if (Has(OFFSETS_ENABLED)) {
 		std::string message = Fmt("%d (%i)", offset, g_repeatedOffsets);
-		const int mode = (g_set[Bools2] >> OFFSETS_SLOW_SHIFT) & 3;
-		if (mode > 0) message += Fmt(" | %d under %d%%", slow[mode - 1], mode * 25);
 		int idx = OffsetColorIdx(offset);
 		if (Has(OFFSETS_ADVANCED)) {
 			if (overlap) { message += " Overlap"; idx = GainReallyBad; }
@@ -769,8 +794,7 @@ void PreTrainer(bool inbhop)
 	}
 
 	const int which = TrainerSpeedIdx();
-	// the first group whose own HUD is off, else 5
-	const int group = !Has(TRAINER_ENABLED) ? 0 : !Has(JHUD_ENABLED) ? 1 : !Has(OFFSETS_ENABLED) ? 2 : !Has(SHOWKEYS_ENABLED) ? 3 : !Has(SPEEDOMETER_ENABLED) ? 4 : 5;
+	const int group = PreTrainerGroup();
 	if (Has2(PRETRAINER_COMPACT) && PerFrame()) {
 		const float v[3] = { value, pace, top };
 		FrameSample(g_framePre, v, which, group);
