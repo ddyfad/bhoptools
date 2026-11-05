@@ -3,14 +3,14 @@ name: Staging (dev builds, promote)
 # Only for ddyfad/bhoptools-staging; see STAGING.md. Promote pushes this file to the public repo
 # along with everything else, so every job checks the repository first.
 #
-# Push: builds bhoptools-dev and the public variant. Pushes to sourcejump and dev/* publish them
+# Push: builds bhoptools-dev and the public variant. Pushes to main publish them
 # as the pre-release dev-<run number>, which bhoptools-dev updates from.
 # Run by hand (promote), in two steps:
 #   1. dev_tag and version, no sums_signature: rebuilds the public variant from the dev build's
 #      commit with only version.h changed, and keeps the files and their SHA256SUMS as the
 #      "release" artifact. Nothing goes public.
 #   2. build_run (step 1's run id) and sums_signature (SHA256SUMS signed with the release key):
-#      checks the signature, pushes the commit to the public sourcejump branch and publishes
+#      checks the signature, pushes the commit to the public main branch and publishes
 #      step 1's files, SHA256SUMS and SHA256SUMS.sig as a public release.
 
 on:
@@ -105,9 +105,9 @@ jobs:
             exit 1
           fi
           # Fast-forward only: the public branch must already be part of the dev build's history.
-          if git fetch -q https://github.com/ddyfad/bhoptools.git sourcejump; then
+          if git fetch -q https://github.com/ddyfad/bhoptools.git main; then
             if ! git merge-base --is-ancestor FETCH_HEAD "$sha"; then
-              echo "::error::public sourcejump ($(git rev-parse --short FETCH_HEAD)) has commits that $DEV_TAG ($sha) doesn't. Merge it into staging, push, and promote the dev build that makes."
+              echo "::error::public main ($(git rev-parse --short FETCH_HEAD)) has commits that $DEV_TAG ($sha) doesn't. Merge it into staging, push, and promote the dev build that makes."
               exit 1
             fi
           fi
@@ -198,7 +198,7 @@ jobs:
           if-no-files-found: error
 
   dev-release:
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/sourcejump' || startsWith(github.ref, 'refs/heads/dev/'))
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: [prepare, build, build-linux]
     runs-on: ubuntu-latest
     permissions:
@@ -409,7 +409,7 @@ jobs:
           VERSION: ${{ steps.meta.outputs.version }}
         run: bash .github/check-release.sh "$RUNNER_TEMP/release/out" "$VERSION"
 
-      - name: Push to the public sourcejump branch
+      - name: Push to the public main branch
         env:
           SHA: ${{ steps.meta.outputs.sha }}
           VERSION: ${{ steps.meta.outputs.version }}
@@ -419,8 +419,8 @@ jobs:
             exit 1
           fi
           git remote add public "https://x-access-token:${GH_TOKEN}@github.com/ddyfad/bhoptools.git"
-          if ! git push public "$SHA:refs/heads/sourcejump"; then
-            echo "::error::couldn't push $SHA to public sourcejump: it moved since the check (not a fast-forward any more), or PUBLIC_REPO_TOKEN lacks Contents or Workflows write"
+          if ! git push public "$SHA:refs/heads/main"; then
+            echo "::error::couldn't push $SHA to public main: it moved since the check (not a fast-forward any more), or PUBLIC_REPO_TOKEN lacks Contents or Workflows write"
             exit 1
           fi
 

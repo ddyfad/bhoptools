@@ -5,7 +5,7 @@ they reach ddyfad/bhoptools. There are two clients:
 
 - **bhoptools**: the public client. Updates from the public repo's releases, settings in
   `%APPDATA%\bhoptools` (Linux `~/.config/bhoptools`).
-- **bhoptools-dev**: built from this repo on every push to `sourcejump` or `dev/*`. Updates from this
+- **bhoptools-dev**: built from this repo on every push to `main`. Updates from this
   repo's `dev-<n>` pre-releases, settings in `%APPDATA%\bhoptools-dev` (Linux
   `~/.config/bhoptools-dev`). The Options tab and the console say "bhoptools dev", and the version
   is `dev-<n> (<commit>)`.
@@ -56,7 +56,7 @@ The dev releases themselves use the workflow's own `GITHUB_TOKEN`, nothing to se
 
 ## Dev releases
 
-Every push to `sourcejump` or `dev/*` publishes the pre-release `dev-<run number>` with:
+Every push to `main` publishes the pre-release `dev-<run number>` with:
 
 - `bhoptools-dev.exe`, `bhoptools-dev-linux.tar.gz`, `bhoptools-dev.so`, `bhoptools-dev`: the dev client;
 - `public-bhoptools.exe`, `public-bhoptools-linux.tar.gz`, `public-bhoptools.so`, `public-bhoptools`:
@@ -103,12 +103,12 @@ in between. Nothing goes public until the second run has checked the signature.
 **Step 1: build.** When a dev build is good (cmd.exe, one line):
 
 ```
-gh workflow run staging.yml -R ddyfad/bhoptools-staging --ref sourcejump -f dev_tag=dev-48 -f version=1.13 -f notes="what changed" -f required_update=false -f prerelease=false
+gh workflow run staging.yml -R ddyfad/bhoptools-staging --ref main -f dev_tag=dev-48 -f version=1.13 -f notes="what changed" -f required_update=false -f prerelease=false
 ```
 
 It:
 
-1. checks the inputs, that `1.13` isn't released yet, and that the public `sourcejump` branch is
+1. checks the inputs, that `1.13` isn't released yet, and that the public `main` branch is
    part of `dev-48`'s history (fast-forward only; if public has commits staging doesn't, merge them
    here first and promote the dev build that makes);
 2. builds the public variant from `dev-48`'s commit with `version.h` set to `1.13`;
@@ -137,7 +137,7 @@ ssh-keygen -Y verify -f .github\release_signers -I release -n bhoptools-release 
 **Step 3: publish.**
 
 ```
-gh workflow run staging.yml -R ddyfad/bhoptools-staging --ref sourcejump -f build_run=<run id> -F sums_signature=@%USERPROFILE%\bhoptools-release\1.13\out\SHA256SUMS.sig
+gh workflow run staging.yml -R ddyfad/bhoptools-staging --ref main -f build_run=<run id> -F sums_signature=@%USERPROFILE%\bhoptools-release\1.13\out\SHA256SUMS.sig
 ```
 
 `-F ...=@file` makes gh read the value from the file. The web form works too (paste the whole
@@ -148,7 +148,7 @@ gh workflow run staging.yml -R ddyfad/bhoptools-staging --ref sourcejump -f buil
 2. checks `SHA256SUMS.sig` with `ssh-keygen -Y verify` against `.github/release_signers`, then
    with the client's own check (`client/tests/check_sums`): a pinned key, the YubiKey's
    user-presence and PIN flags, the version line, and every file's sha256;
-3. pushes the commit to the public `sourcejump` branch;
+3. pushes the commit to the public `main` branch;
 4. publishes release `1.13` on ddyfad/bhoptools with the four files, `SHA256SUMS` and
    `SHA256SUMS.sig`, and the notes in the format the public client reads (`[required]` when ticked,
    the notes, then `---` and the install text). The line under `---` records the commit and dev
@@ -157,7 +157,6 @@ gh workflow run staging.yml -R ddyfad/bhoptools-staging --ref sourcejump -f buil
 The public repo's own `build-windows.yml` has the same two steps: `release_tag` (step 1), then
 `build_run` and `sums_signature` (`gh workflow run build-windows.yml -R ddyfad/bhoptools ...`).
 
-Merging public `sourcejump` into public `main` is still done there, by PR.
 
 Everything in this repo goes public with the commit, this file and `staging.yml` included. The
 workflow checks the repository name, so it does nothing in the public repo.
