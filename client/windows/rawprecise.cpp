@@ -1,9 +1,5 @@
-// rawinput2 spreads the movement it has evenly over the frame's time, since all it knows is when the
-// game last read the raw input queue. Here a thread of ours owns the mouse's raw input and stamps
-// every report with the time it arrived, so a tick ending at time t takes exactly the reports up
-// to t. Windows allows one target window per device class in a process, so while this is on the
-// mouse is registered to our window (RIDEV_INPUTSINK, since a message-only window is never in
-// front) and the game's own registrations of it are redirected there.
+// Windows allows one raw input target per device class, so while this is on the mouse is registered to our
+// message-only window (with RIDEV_INPUTSINK, as it's never in front) and the game's registrations go there too.
 #include "rawprecise.h"
 #include "pollfix.h"
 #include "settings.h"
@@ -27,16 +23,16 @@ struct Report { LONGLONG t; int dx, dy; };
 
 // Shared with the input thread, under g_lock.
 SRWLOCK g_lock = SRWLOCK_INIT;
-const size_t kCap = 65536;  // 8 s at 8 kHz; past that a report is added to the newest
+const size_t kCap = 65536;
 Report g_ring[kCap];
 size_t g_head, g_count;
 std::vector<RAWMOUSE> g_buttons;
-int g_reports;           // since the last FlushButtons
-int g_pendX, g_pendY;    // not yet given to the old method's shadow
+int g_reports;
+int g_pendX, g_pendY;
 
 LONGLONG g_freq;
 double (*g_plat)();
-HWND g_window;           // ours, on the input thread
+HWND g_window;
 DWORD g_threadId;
 HANDLE g_thread;
 std::atomic<HWND> g_gameWindow;
@@ -46,11 +42,10 @@ UINT g_shutdownMsg;
 bool g_on;
 bool g_shutdown;
 bool g_failed;
-HWND g_gameTarget;       // what the game registered the mouse to, given back when this turns off
+HWND g_gameTarget;
 bool g_gameSink;
 
-// What rawinput2's even spread would have given, fed the same reports the way it reads them:
-// all at once, stamped with the time of the read. For bhoptools_rawcompare.
+// The old even spread, fed the same reports, for bhoptools_rawcompare.
 MouseSplit g_shadow;
 struct Tick { int px, py, ox, oy; };
 std::vector<Tick> g_ticks;
@@ -93,8 +88,6 @@ LRESULT CALLBACK InputProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
 	if (msg == WM_INPUT) {
 		const LONGLONG t = Now();
-		// RIDEV_INPUTSINK also delivers it while the game is in the background; the game's own
-		// registration wouldn't have.
 		const HWND game = g_gameWindow.load();
 		RAWINPUT ri;
 		UINT size = sizeof(ri);
@@ -142,8 +135,7 @@ bool FindMouseRegistration(RAWINPUTDEVICE& out)
 	return false;
 }
 
-// While on, the game (a new video mode, m_rawinput) and no-legacy registering the mouse keep it on
-// our window. What the game asked for is kept for turning off.
+// Keeps the game's re-registrations of the mouse on our window.
 BOOL WINAPI Hooked_RegisterRawInputDevices(PCRAWINPUTDEVICE devices, UINT count, UINT size)
 {
 	if (!g_on || !devices || size != sizeof(RAWINPUTDEVICE) || count == 0 || count > 16)
@@ -298,8 +290,6 @@ void Update(bool rawActive, int (*drain)())
 		SwitchOff();
 		return;
 	}
-	// What's queued for the game's window goes to the engine's accumulators first; GetRawMouseAccumulators
-	// still hands those out.
 	drain();
 	RAWINPUTDEVICE d;
 	if (!FindMouseRegistration(d)) return;
@@ -382,11 +372,13 @@ void RegisterCommands()
 		CoreLog("rawinput2 precise: couldn't register bhoptools_rawprecise and bhoptools_rawcompare");
 		return;
 	}
-	const struct { const char* name; const char* help; void (*fn)(const CCommandX&); } defs[2] = {
+	const struct { const char* name; const char* help; void (*fn)(const CCommandX&); } defs[] = {
 		{ "bhoptools_rawprecise", "rawinput2 precise: mouse reports timestamped on their own thread, each tick takes its own (0/1, off by default).", Cmd_RawPrecise },
+#ifdef BHOPTOOLS_DEV
 		{ "bhoptools_rawcompare", "Records for N seconds (default 5) what each tick got with precise against rawinput2's even spread, prints the difference and writes rawcompare.csv.", Cmd_RawCompare },
+#endif
 	};
-	for (int i = 0; i < 2; ++i) {
+	for (int i = 0; i < (int)(sizeof(defs) / sizeof(defs[0])); ++i) {
 		ConCommandX& c = g_cmds[i];
 		c.vtable = *reinterpret_cast<void**>(echo);
 		c.name = defs[i].name;

@@ -1308,7 +1308,6 @@ void Cmd_Menu(const CCommandX& c)
 	bool on = false;
 	g_menuTeleOn = MenuItemLine(g_menuBase, g_menuPrefix, 2, &on) >= 0 && on;
 	// Drawn before the server ran a prev/next or save we predicted, like shavit's twice-a-second redraw.
-	// A menu held back shows as the server drew it once nothing predicted is left to draw over it.
 	if (!RedrawMenu() && g_menuHeldAt >= 0) SendMenu(g_menuBase, g_menuBaseLen, g_menuBaseKeys);
 	g_menuHeldAt = -1;
 }
@@ -1326,7 +1325,7 @@ bool OnShowMenu(const BfRead& msg)
 	if (msg.curBit & 7) return false;
 	const int at = msg.curBit / 8;
 	if (at + 4 > msg.bytes) return false;
-	const bool single = !g_menuMore;  // a part of a longer menu has already reached the screen
+	const bool single = !g_menuMore;
 	const bool baseOk = g_menuBaseOk;
 	if (!g_menuMore) {
 		g_menuLen = 0;
@@ -1347,8 +1346,7 @@ bool OnShowMenu(const BfRead& msg)
 	char shape[sizeof(g_cpShape)];
 	const bool sameCp = g_menuWasCp && g_cpShapeLen > 0 && MenuShape(g_menuText, g_menuLen, g_cpShapeLines, shape, sizeof(shape)) == g_cpShapeLen
 		&& memcmp(shape, g_cpShape, g_cpShapeLen) == 0;
-	// Drawn before the server ran a key we predicted: the screen already shows what the key did, so this stays off
-	// it until its bhoptools_menu says whether it's still behind, instead of the old numbers flashing back.
+	// Drawn before the server ran a key we predicted; showing it would flash the old numbers back.
 	if (sameCp && single && g_shownLen > 0 && MenuPredicted()) {
 		g_cpMenu = true;
 		g_menuBaseOk = baseOk;
@@ -1606,7 +1604,6 @@ void MaybeHello()
 {
 	const double now = MonotonicSeconds();
 	if (!g_session) ResetSession();
-	// A held-back menu whose bhoptools_menu never came.
 	if (g_menuHeldAt >= 0 && now - g_menuHeldAt >= kMenuWindow && !g_menuMore) {
 		g_menuHeldAt = -1;
 		SendMenu(g_menuText, g_menuLen, g_menuSlots);

@@ -114,8 +114,7 @@ void ReleaseButtons()
 	}
 }
 
-// Looking around rather than in a menu, the console or chat: what CInput::MouseMove asks before mouselook. The
-// Windows cursor isn't enough: chat wants one, but only shows it once a cursor message comes, which no-legacy stops.
+// What CInput::MouseMove checks. The Windows cursor misses chat, which only shows one after a cursor message.
 bool InGame()
 {
 	static void* surface = CreateInterfaceIn(SURFACE_MODULE, "VGUI_Surface030");
@@ -434,8 +433,7 @@ void OnRawMouse(const RAWMOUSE& m)
 		if (f & b.down) { g_buttonsDown |= b.mk; PostButton(b.msgDown, b.x); }
 		if (f & b.up) { g_buttonsDown &= ~b.mk; PostButton(b.msgUp, b.x); }
 	}
-	// The engine takes any wheel delta that isn't above 0 as wheel down, so an empty one would be a mwheeldown.
-	// Turning no-legacy on was jumping players bound to it.
+	// The engine reads an empty wheel report as wheel down.
 	if ((f & RI_MOUSE_WHEEL) && (SHORT)m.usButtonData == 0) {
 		g_s.emptyWheels++;
 	} else if (f & RI_MOUSE_WHEEL) {
@@ -466,12 +464,14 @@ void RegisterCommands()
 		CoreLog("pollfix: couldn't register bhoptools_pumpstats and bhoptools_pollfix");
 		return;
 	}
-	const struct { const char* name; const char* help; void (*fn)(const CCommandX&); } defs[3] = {
-		{ "bhoptools_pumpstats", "Print and reset what the message pump cost since the last print.", Cmd_PumpStats },
+	const struct { const char* name; const char* help; void (*fn)(const CCommandX&); } defs[] = {
 		{ "bhoptools_pollfix", "High polling rate fix: no legacy mouse messages in game, the message pump filtered in menus (0/1, on by default).", Cmd_PollFix },
+#ifdef BHOPTOOLS_DEV
+		{ "bhoptools_pumpstats", "Print and reset what the message pump cost since the last print.", Cmd_PumpStats },
 		{ "bhoptools_nolegacy", "With the fix on, 0 leaves only the pump filtering, for comparing (on by default, not saved).", Cmd_NoLegacy },
+#endif
 	};
-	for (int i = 0; i < 3; ++i) {
+	for (int i = 0; i < (int)(sizeof(defs) / sizeof(defs[0])); ++i) {
 		ConCommandX& c = g_cmds[i];
 		c.vtable = *reinterpret_cast<void**>(echo);
 		c.name = defs[i].name;

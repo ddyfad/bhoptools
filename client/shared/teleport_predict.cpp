@@ -1494,12 +1494,14 @@ void RegisterCommands()
         CoreLog("bhoptools: couldn't register the prediction commands");
         return;
     }
-    const struct { const char* name; const char* help; void (*fn)(const CCommandX&); } defs[kCmdCount] = {
+    const struct { const char* name; const char* help; void (*fn)(const CCommandX&); } defs[] = {
         { "bhoptools_predict", "Client-side prediction of triggers, rngfix, checkpoints and HUD speed (0/1).", Cmd_Predict },
         { "bhoptools_log", "Start or stop writing debug info to cstrike/bhoptools_log.txt, to send with a bug report.", Cmd_Log },
+#ifdef BHOPTOOLS_DEV
         { "bhoptools_shotlog", "Print predicted shots on damage-activated buttons, the targetname they give and the pushes that follow (0/1).", Cmd_ShotLog },
+#endif
     };
-    for (int i = 0; i < kCmdCount; ++i) {
+    for (int i = 0; i < (int)(sizeof(defs) / sizeof(defs[0])); ++i) {
         ConCommandX& c = g_cmds[i];
         c.vtable = *reinterpret_cast<void**>(echo);
         c.name = defs[i].name;
