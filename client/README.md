@@ -12,6 +12,7 @@ Also included:
   - checkpoint saves and teleports, from binds or shavit's checkpoint menu keys, with teleports following the menu's angle and velocity settings
   - noclip, restarts (`sm_r`) and setting the start position (`sm_sp`)
   - the server's shavit runspeed, easybhop, landfix, style key blocking, shavit-syncstyle autosync, momsurffix2 and mpbhops_but_working doors
+  - on SourceJump servers, your own shots on damage-activated buttons (shoot-to-boost: the targetname they give you and take back), from the game's own bullet trace
 - Linux: chat characters the chat font has no glyph for are drawn from a fallback font instead of as boxes (`chat_glyphs 0/1`)
 - Linux: map textures under a one-character folder like `materials/z/` load instead of going missing (the game drops that folder from the name on Linux), so the singleletterfix pack isn't needed for them
 

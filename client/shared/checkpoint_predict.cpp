@@ -53,6 +53,8 @@ const int kServerHold = 1 << 18;
 // The SourceJump plugin's landfix (bhoptools_move landfix 3) and momsurffix2 d0bb295 with bevel_fix and disp_fix.
 const int kServerSjLandfix = 1 << 24;
 const int kServerSjMsf     = 1 << 25;
+// SourceJump's eventqueue makes a func_button's attacker the activator of its OnDamaged.
+const int kServerSjButtons = 1 << 26;
 // bhoptools_hello flags
 const int kClientTriggers = 1 << 0;
 const int kClientMenus    = 1 << 1;
@@ -413,6 +415,7 @@ void ResetSession()
 	g_caps = false;
 	tp::SetUntouchEachCommand(false);
 	tp::SetMpbhopsLoaded(false);
+	tp::SetButtonShots(false);
 	g_capsCmd = 0;
 	g_chatMsg = -1;
 	g_chat.Clear();
@@ -497,6 +500,7 @@ void Cmd_Caps(const CCommandX& c)
 		SetEventQueueFixIfChanged(false);
 		tp::SetUntouchEachCommand(false);
 		tp::SetMpbhopsLoaded(false);
+		tp::SetButtonShots(false);
 		SetRngfix(RngSettings());
 		ResetMove();
 		ResetZones();
@@ -518,6 +522,7 @@ void Cmd_Caps(const CCommandX& c)
 	g_serverFlags = ArgInt(c, 4);
 	tp::SetUntouchEachCommand((g_serverFlags & kServerUntouch) != 0);
 	tp::SetMpbhopsLoaded((g_serverFlags & kServerMpbhops) != 0);
+	tp::SetButtonShots((g_serverFlags & kServerSjButtons) != 0);
 	g_chatClient = ArgInt(c, 5);
 	g_chatMsg = c.argc > 6 ? ArgInt(c, 6) : -1;
 	js::SetChat(g_chatClient, g_chatMsg);
