@@ -45,7 +45,7 @@ struct Stats {
 	unsigned procInput, procMouseMove, procHitTest, procSetCursor, procOther;
 	unsigned drains, rawReports;
 	unsigned noLegacyPumps, reregisters, postedButtons;
-	unsigned offNotFront, offNoRaw, offCursor, cursorHidden, cursorClipped;
+	unsigned offNotFront, offNoRaw, offCursor;
 	Shape shapes[8];
 	int shapeCount;
 };
@@ -61,8 +61,9 @@ bool g_tookMouseMove, g_tookNcMouseMove, g_tookUnfiltered;
 
 // No-legacy mode: the mouse registered with RIDEV_NOLEGACY while looking around, so Windows stops
 // making a WM_MOUSEMOVE (with its WM_NCHITTEST and WM_SETCURSOR) for every report. Filtering the
-// pump still leaves win32k doing that work per report; this is the only way to stop it.
-bool g_noLegacyWanted;
+// pump still leaves win32k doing that work per report; this is the only way to stop it. Part of
+// the high polling rate fix; bhoptools_nolegacy 0 turns just this half off, for comparing.
+bool g_noLegacyWanted = true;
 bool g_noLegacyOn;
 WPARAM g_buttonsDown;  // MK_* we've posted down and not up
 
@@ -110,19 +111,11 @@ void ReleaseButtons()
 	}
 }
 
-// The game is looking around rather than showing a menu: the cursor is hidden, or clipped to a
-// part of the game window. Each is counted, to learn which one CS:S actually gives.
+// Looking around rather than in a menu or the console. CS:S hides the cursor then; it never clips it.
 bool InGame()
 {
 	CURSORINFO ci = { sizeof(ci) };
-	const bool hidden = GetCursorInfo(&ci) && (!(ci.flags & CURSOR_SHOWING) || !ci.hCursor);
-	RECT clip, win;
-	const bool clipped = GetClipCursor(&clip) && GetWindowRect(g_gameWindow, &win)
-		&& clip.left >= win.left && clip.top >= win.top && clip.right <= win.right && clip.bottom <= win.bottom
-		&& (clip.right - clip.left < GetSystemMetrics(SM_CXVIRTUALSCREEN) || clip.bottom - clip.top < GetSystemMetrics(SM_CYVIRTUALSCREEN));
-	if (hidden) g_s.cursorHidden++;
-	if (clipped) g_s.cursorClipped++;
-	return hidden || clipped;
+	return GetCursorInfo(&ci) && (!(ci.flags & CURSOR_SHOWING) || !ci.hCursor);
 }
 
 // Once per pump: no-legacy only while the game is in front and looking around (menus need the
@@ -130,7 +123,7 @@ bool InGame()
 void UpdateNoLegacy()
 {
 	bool want = false;
-	if (!g_noLegacyWanted || !g_gameWindow) {
+	if (!settings::Get().pollfix || !g_noLegacyWanted || !g_gameWindow) {
 	} else if (GetForegroundWindow() != g_gameWindow) {
 		g_s.offNotFront++;
 	} else if (!g_rawActive || !g_rawActive()) {
@@ -298,10 +291,10 @@ void Cmd_PumpStats(const CCommandX&)
 	CoreLog("  window proc: %u WM_INPUT, %u WM_MOUSEMOVE, %u WM_NCHITTEST, %u WM_SETCURSOR, %u other; raw: %u reports in %u batch reads",
 		g_s.procInput, g_s.procMouseMove, g_s.procHitTest, g_s.procSetCursor, g_s.procOther, g_s.rawReports, g_s.drains);
 	CoreLog("  no-legacy %s: on for %u of %u pumps, %u re-registrations, %u buttons/wheel posted",
-		g_noLegacyWanted ? "wanted" : "off", g_s.noLegacyPumps, g_s.pumps, g_s.reregisters, g_s.postedButtons);
-	if (g_noLegacyWanted)
-		CoreLog("  no-legacy off because: %u not in front, %u raw input not active, %u in a menu; in game by: %u cursor hidden, %u cursor clipped",
-			g_s.offNotFront, g_s.offNoRaw, g_s.offCursor, g_s.cursorHidden, g_s.cursorClipped);
+		g_noLegacyWanted && settings::Get().pollfix ? "wanted" : "off", g_s.noLegacyPumps, g_s.pumps, g_s.reregisters, g_s.postedButtons);
+	if (g_noLegacyWanted && settings::Get().pollfix)
+		CoreLog("  no-legacy off because: %u not in front, %u raw input not active, %u in a menu or the console",
+			g_s.offNotFront, g_s.offNoRaw, g_s.offCursor);
 	for (int i = 0; i < g_s.shapeCount; ++i) {
 		const Shape& s = g_s.shapes[i];
 		CoreLog("  PeekMessage(hwnd=%p, %u..%u, flags 0x%x) from %s: %u calls", s.hwnd, s.min, s.max, s.flags, s.from ? s.from : "elsewhere", s.count);
@@ -429,8 +422,8 @@ void RegisterCommands()
 	}
 	const struct { const char* name; const char* help; void (*fn)(const CCommandX&); } defs[3] = {
 		{ "bhoptools_pumpstats", "Print and reset what the message pump cost since the last print.", Cmd_PumpStats },
-		{ "bhoptools_pollfix", "High polling rate fix: filter the message pump the way Godot does (0/1, off by default).", Cmd_PollFix },
-		{ "bhoptools_nolegacy", "Stop Windows making cursor messages for every mouse report while looking around (0/1, off by default).", Cmd_NoLegacy },
+		{ "bhoptools_pollfix", "High polling rate fix: no legacy mouse messages in game, the message pump filtered in menus (0/1, on by default).", Cmd_PollFix },
+		{ "bhoptools_nolegacy", "With the fix on, 0 leaves only the pump filtering, for comparing (on by default, not saved).", Cmd_NoLegacy },
 	};
 	for (int i = 0; i < 3; ++i) {
 		ConCommandX& c = g_cmds[i];

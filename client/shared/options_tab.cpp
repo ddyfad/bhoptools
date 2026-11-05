@@ -53,7 +53,7 @@ const Row kRows[] = {
 	{ &Settings::speedo,    &Settings::hudkeys, L"clientside hud fixes" },
 	{ &Settings::jsframe,   nullptr,            L"jumpstats trainers every frame (off: every tick)" },
 #ifdef _WIN32
-	{ &Settings::pollfix,   nullptr,            L"high polling rate fix (4-8 kHz mice: fewer messages through the game's input loop)" },
+	{ &Settings::pollfix,   nullptr,            L"high polling rate fix (4-8 kHz mice: no fps loss while moving the mouse)" },
 #endif
 };
 const int kRowCount = sizeof(kRows) / sizeof(kRows[0]);

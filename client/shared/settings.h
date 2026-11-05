@@ -14,7 +14,7 @@ struct Settings {
 	bool hudkeys   = true;
 	bool jsframe   = false;  // client-drawn compact trainers redrawn every frame instead of every tick
 	bool chatglyphs = true;  // Linux only
-	bool pollfix   = false;  // Windows only: the message pump filtered for high polling rate mice
+	bool pollfix   = true;   // Windows only: no legacy mouse messages in game, the message pump filtered in menus
 };
 
 namespace settings {
