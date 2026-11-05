@@ -65,6 +65,7 @@ bool g_tookMouseMove, g_tookNcMouseMove, g_tookUnfiltered;
 // the high polling rate fix; bhoptools_nolegacy 0 turns just this half off, for comparing.
 bool g_noLegacyWanted = true;
 bool g_noLegacyOn;
+bool g_registerFailed;
 WPARAM g_buttonsDown;  // MK_* we've posted down and not up
 
 LONGLONG Now()
@@ -138,10 +139,14 @@ void UpdateNoLegacy()
 	if (!FindMouseRegistration(d)) return;
 	d.dwFlags = want ? (d.dwFlags | RIDEV_NOLEGACY) : (d.dwFlags & ~RIDEV_NOLEGACY);
 	if (!RegisterRawInputDevices(&d, 1, sizeof(d))) {
-		CoreLog("no-legacy: RegisterRawInputDevices failed (%lu), turning it off", GetLastError());
+		// Turning off is retried every pump, so log it once until it works.
+		if (!g_registerFailed)
+			CoreLog("no-legacy: RegisterRawInputDevices failed (%lu), turning it off", GetLastError());
+		g_registerFailed = true;
 		g_noLegacyWanted = false;
 		return;
 	}
+	g_registerFailed = false;
 	g_noLegacyOn = want;
 	g_s.reregisters++;
 	if (!want) ReleaseButtons();
