@@ -840,6 +840,39 @@ bool UseTrace(const float start[3], const float end[3], float half, float* fract
     return true;
 }
 
+// Our own bullets, for damage-activated buttons: CCSPlayer::FireBullet's first trace starts at our eye with
+// CS_MASK_SHOOT | CONTENTS_HITBOX, during ItemPostFrame right after the command's ProcessMovement. The client only
+// fires it on the first run. The game traces it with the spread and recoil the server uses, so its hit is the
+// server's whenever the prediction was right; a wrong one is put right by the server's targetname sync.
+const unsigned int kMaskShot = 0x4600400B;
+bool  g_shotWindow;
+int   g_shotKey;
+float g_shotEye[3];
+bool  g_shotsWatched, g_shotsTried;
+
+void OnGameTrace(const etrace::RayX& ray, unsigned int mask, const etrace::GameTraceX& tr)
+{
+    if (!g_shotWindow || mask != kMaskShot || tr.fraction >= 1.0f || !tr.ent) return;
+    const float d[3] = { ray.start.x - g_shotEye[0], ray.start.y - g_shotEye[1], ray.start.z - g_shotEye[2] };
+    if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2] > 16.0f) return;
+    // Not the world, nor a player in front of it.
+    const int index = etrace::EntityIndex(tr.ent);
+    if (index >= 0 && index <= 64) return;
+    const int button = PredButtonAt(g_rt, tr.endpos);
+    if (button >= 0) PredNoteShot(g_rt, g_shotKey, button);
+}
+
+// The hook goes on the slot the engine tracer's validation proved is TraceRay.
+bool ShotsWatched()
+{
+    if (!g_shotsWatched && !g_shotsTried && g_rngp && g_rngp->engine && g_rngp->engine->Ready()) {
+        g_shotsTried = true;
+        g_shotsWatched = etrace::WatchTraces(OnGameTrace);
+        CoreLog(g_shotsWatched ? "button shots: watching our bullet traces" : "button shots: couldn't hook TraceRay, not predicted");
+    }
+    return g_shotsWatched;
+}
+
 // Both methods trace 2 units down.
 bool LandfixTrace(const float origin[3], bool ducked, bool onGround, bool firstRun, float* endZ, bool* hit)
 {
@@ -1136,6 +1169,8 @@ void PredLogEnd(const char* pl, int key, bool snapped)
 
 void Hooked_ProcessMovement(void* thisptr, void* pPlayer, void* pMove)
 {
+    // The last command's shot, if any, has been traced by now.
+    g_shotWindow = false;
     if (!pMove || !pPlayer) { oProcessMovement(thisptr, pPlayer, pMove); return; }
 
     char* md = static_cast<char*>(pMove);
@@ -1300,6 +1335,14 @@ void Hooked_ProcessMovement(void* thisptr, void* pPlayer, void* pMove)
     g_moveVelocityTeleported = rng && (g_rngp->rng.fixes & (RNG_FIX_STAIRS | RNG_FIX_INCLINE | RNG_FIX_TELEHOP));
 
     if (triggers && firstRun) {
+        g_shotWindow = g_rt.buttonShots && g_rt.eventQueueFix && io.solid && !g_rt.map->buttons.empty() && ShotsWatched();
+        if (g_shotWindow) {
+            g_shotKey = PredSnapshotKey(io);
+            const float eyeZ = g_viewOffsetZ > 0 ? *reinterpret_cast<const float*>(pl + g_viewOffsetZ) : io.viewHeight;
+            g_shotEye[0] = origin->x;
+            g_shotEye[1] = origin->y;
+            g_shotEye[2] = origin->z + eyeZ;
+        }
         if (g_rt.viewSnapPending) {
             const Vector3 dest = { g_rt.viewSnapAngles[0], g_rt.viewSnapAngles[1], g_rt.viewSnapAngles[2] };
             g_predictedSnaps[g_predictedSnapNext] = { true, g_runningCmdNumber, dest };
@@ -1487,6 +1530,7 @@ void Detach()
     g_maxSpeedVtable = nullptr;
     msf::Detach();
     js::Detach();
+    etrace::UnwatchTraces();
 }
 #else
 bool Attach()
@@ -1566,6 +1610,8 @@ void SetEventQueueFix(bool on)
 void SetUntouchEachCommand(bool on) { g_untouchEachCommand = on; }
 
 void SetMpbhopsLoaded(bool on) { g_mpbhopsLoaded = on; }
+
+void SetButtonShots(bool on) { g_rt.buttonShots = on; }
 
 void SetRunningCommand(int key, int cmdNumber)
 {

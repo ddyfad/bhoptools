@@ -43,5 +43,7 @@ void OnJump();
 void PostMove(const float origin[3], const float velocity[3]);
 // A predicted checkpoint teleport: Shavit_OnTeleport.
 void OnTeleport();
+// Once a rendered frame (IN_SetSampleTime), for the HUDs drawn per frame.
+void OnFrame();
 
 }

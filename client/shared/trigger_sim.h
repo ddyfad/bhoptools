@@ -26,7 +26,7 @@ static const int FL_CLIENT_BIT   = 1 << 8;
 
 enum PredClass {
 	PC_NONE, PC_TELEPORT, PC_PUSH, PC_GRAVITY, PC_MULTIPLE, PC_ONCE,
-	PC_RELAY, PC_COUNTER, PC_BRANCH, PC_CASE, PC_DOOR
+	PC_RELAY, PC_COUNTER, PC_BRANCH, PC_CASE, PC_DOOR, PC_BUTTON
 };
 
 enum PredInput {
@@ -43,7 +43,7 @@ enum PredOutput {
 	OUT_ONTOUCHING, OUT_ONNOTTOUCHING, OUT_ONTRIGGER,
 	OUT_OUTVALUE, OUT_ONGETVALUE, OUT_ONHITMIN, OUT_ONHITMAX,
 	OUT_ONTRUE, OUT_ONFALSE, OUT_ONDEFAULT,
-	OUT_ONOPEN, OUT_ONFULLYOPEN, OUT_ONCLOSE, OUT_ONFULLYCLOSED,
+	OUT_ONOPEN, OUT_ONFULLYOPEN, OUT_ONCLOSE, OUT_ONFULLYCLOSED, OUT_ONDAMAGED,
 	OUT_ONCASE0
 };
 
@@ -201,6 +201,7 @@ static PredClass PredClassify(const char* cls)
 	if (!strcmp(cls, "logic_branch"))     return PC_BRANCH;
 	if (!strcmp(cls, "logic_case"))       return PC_CASE;
 	if (!strcmp(cls, "func_door") || !strcmp(cls, "func_door_rotating")) return PC_DOOR;
+	if (!strcmp(cls, "func_button"))      return PC_BUTTON;
 	return PC_NONE;
 }
 
@@ -229,6 +230,7 @@ static int PredOutputId(const char* name)
 	if (!strcasecmp(name, "OnFullyOpen"))     return OUT_ONFULLYOPEN;
 	if (!strcasecmp(name, "OnClose"))         return OUT_ONCLOSE;
 	if (!strcasecmp(name, "OnFullyClosed"))   return OUT_ONFULLYCLOSED;
+	if (!strcasecmp(name, "OnDamaged"))       return OUT_ONDAMAGED;
 	if (!strncasecmp(name, "OnCase", 6)) {
 		int n = atoi(name + 6);
 		if (n >= 1 && n <= 16) return OUT_ONCASE0 + (n - 1);
@@ -273,6 +275,10 @@ static int PredInputId(PredClass targetCls, const char* name)
 		if (!strcasecmp(name, "Lock"))   return IN_DOOR_LOCK;
 		if (!strcasecmp(name, "Unlock")) return IN_DOOR_UNLOCK;
 		// A door has no Enable or Disable.
+		if (!strcasecmp(name, "Kill") || !strcasecmp(name, "KillHierarchy")) return IN_KILL;
+		return IN_NONE;
+	case PC_BUTTON:
+		// Lock doesn't stop OnDamaged, so only a kill matters.
 		if (!strcasecmp(name, "Kill") || !strcasecmp(name, "KillHierarchy")) return IN_KILL;
 		return IN_NONE;
 	default:
@@ -856,6 +862,12 @@ static void PredBuildTriggers(PredMap& map)
 			e.doorUse = (e.spawnflags & 0x100) && !e.doorStartOpen && !ent.Get("master", "")[0] && !movesWithParent(ent)
 				&& e.modelIndex > 0 && (size_t)e.modelIndex < map.models.size();
 			break; }
+		case PC_BUTTON:
+			// Only its OnDamaged, which our own shots fire (PredNoteShot). Without "damage activates" it takes
+			// no damage, and on a parent the sim can't place it.
+			if (!(atoi(ent.Get("spawnflags", "0")) & 0x200) || e.modelIndex <= 0 || (size_t)e.modelIndex >= map.models.size()
+				|| movesWithParent(ent)) skip = true;
+			break;
 		default:
 			break;
 		}
@@ -951,11 +963,13 @@ static void PredBuildTriggers(PredMap& map)
 
 	map.simByHammerId.clear();
 	map.doors.clear();
+	map.buttons.clear();
 	for (int s = 0; s < (int)map.sim.size(); ++s) {
 		const PredSimEnt& e = map.sim[s];
 		if (e.cls == PC_NONE) continue;
 		map.stats.active++;
 		if (e.cls == PC_DOOR) map.doors.push_back(s);
+		if (e.cls == PC_BUTTON) map.buttons.push_back(s);
 		if (!e.hammerId) continue;
 		auto it = map.simByHammerId.emplace(e.hammerId, s);
 		if (!it.second) it.first->second = -1;
@@ -977,6 +991,14 @@ struct PredRuntime {
 	float viewSnapAngles[3] = {0,0,0};
 
 	bool eventQueueFix = false;
+	// SourceJump's eventqueue makes a func_button's attacker its activator before OnDamaged, so our own shots
+	// on damage-activated buttons can be predicted.
+	bool buttonShots = false;
+	// Our first-run shots that hit one: the command and the button's sim index (PredNoteShot).
+	static const int kShots = 8;
+	int  shotKey[kShots];
+	int  shotButton[kShots];
+	int  shotNext = 0;
 
 	bool  rngfixTelehop = true;
 	int   teleports = 0;
@@ -1064,6 +1086,41 @@ static void PredFireOutput(PredRuntime& rt, int entIdx, int outId, float value, 
 		float v = a.hasParam ? a.param : value;
 		PredEnqueue(rt, a.delay, playerActivator, a.target, a.input, v, ai);
 		if (a.timesToFire != -1 && w.actionTimesLeft[ai] > 0) w.actionTimesLeft[ai]--;
+	}
+}
+
+// A damage-activated button whose bounds (a unit wider) take the point, -1 for none.
+static int PredButtonAt(const PredRuntime& rt, const float p[3])
+{
+	if (!rt.map) return -1;
+	for (int i : rt.map->buttons) {
+		float mins[3], maxs[3];
+		PredTriggerWorldBounds(*rt.map, rt.map->sim[i], 1.0f, mins, maxs);
+		if (p[0] >= mins[0] && p[0] <= maxs[0] && p[1] >= mins[1] && p[1] <= maxs[1] && p[2] >= mins[2] && p[2] <= maxs[2])
+			return i;
+	}
+	return -1;
+}
+
+// Our first-run shot on command `key` hit `button`. The server fires its OnDamaged during that command, and
+// eventqueuefix runs the zero-delay outputs at the start of the next, so PredPreMove fires it there on every run.
+static void PredNoteShot(PredRuntime& rt, int key, int button)
+{
+	for (int k = 0; k < PredRuntime::kShots; ++k)
+		if (rt.shotKey[k] == key && rt.shotButton[k] == button) return;
+	rt.shotKey[rt.shotNext] = key;
+	rt.shotButton[rt.shotNext] = button;
+	rt.shotNext = (rt.shotNext + 1) % PredRuntime::kShots;
+}
+
+static void PredFireShots(PredRuntime& rt, int key)
+{
+	for (int k = 0; k < PredRuntime::kShots; ++k) {
+		const int b = rt.shotButton[k];
+		if (rt.shotKey[k] != key - 1 || rt.world.ents[b].removed) continue;
+		// As if added during the shot's command: due from the start of this one.
+		rt.serviceBase = PredEventClock(*rt.io);
+		PredFireOutput(rt, b, OUT_ONDAMAGED, 0.0f, true);
 	}
 }
 
@@ -1927,6 +1984,7 @@ static void PredReset(PredRuntime& rt)
 
 static void PredRestart(PredRuntime& rt)
 {
+	for (int k = 0; k < PredRuntime::kShots; ++k) rt.shotKey[k] = INT_MIN;
 	rt.candidates.clear();
 	rt.candidates.reserve(rt.map->sim.size());
 	rt.stamp.assign(rt.map->sim.size(), 0u);
@@ -2073,6 +2131,7 @@ static void PredPreMove(PredRuntime& rt, PredPlayerIO& io)
 	}
 	if (rt.eventQueueFix) {
 		const float before[3] = { io.origin[0], io.origin[1], io.origin[2] };
+		if (rt.buttonShots) PredFireShots(rt, PredSnapshotKey(io));
 		PredServicePlayerEvents(rt);
 		// The server's SetupMove sees a teleport from here this same command.
 		if (io.moveFlags && (before[0] != io.origin[0] || before[1] != io.origin[1] || before[2] != io.origin[2]))

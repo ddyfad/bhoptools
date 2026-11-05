@@ -212,6 +212,7 @@ struct PredMap {
 	std::vector<PredFilter>    filters;
 	std::vector<PredMpbhopsDoor> mpbhopsDoors;
 	std::vector<int>             doors; // sim indices of func_door and func_door_rotating
+	std::vector<int>             buttons; // sim indices of damage-activated func_button
 	PredGrid                   grid;
 	struct {
 		int active = 0;

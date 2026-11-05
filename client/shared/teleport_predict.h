@@ -36,6 +36,10 @@ void SetUntouchEachCommand(bool on);
 
 void SetMpbhopsLoaded(bool on);
 
+// The server's eventqueue gives a func_button's attacker as the activator of its OnDamaged, so our own shots on
+// damage-activated buttons are predicted.
+void SetButtonShots(bool on);
+
 // Set around the wrapped ProcessMovement: the command number it runs (the tickbase if that's
 // unusable) and the usercmd number, -1 when not keyed by command number. INT_MIN and -1 outside it.
 void SetRunningCommand(int key, int cmdNumber);

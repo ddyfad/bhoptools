@@ -166,3 +166,50 @@ EngineTracer* CreateEngineTracer()
 }
 
 }
+
+namespace etrace {
+namespace {
+
+TraceWatchFn g_watchFn;
+TraceRayFn   g_watchOrig;
+void**       g_watchSlot;
+
+void Hooked_TraceRay(void* self, const RayX* ray, unsigned int mask, PlayerFilter* filter, GameTraceX* tr)
+{
+	g_watchOrig(self, ray, mask, filter, tr);
+	if (g_watchFn && ray && tr) g_watchFn(*ray, mask, *tr);
+}
+
+}
+
+bool WatchTraces(TraceWatchFn fn)
+{
+	if (g_watchSlot) return true;
+	CreateInterfaceFn create = InterfaceFactory(ENGINE_MODULE);
+	void* trace = create ? create("EngineTraceClient003", nullptr) : nullptr;
+	if (!trace) return false;
+	void** slot = &(*reinterpret_cast<void***>(trace))[kVT_IEngineTrace_TraceRay];
+	if (!InRanges(g_engineText, *slot)) return false;
+	g_watchOrig = reinterpret_cast<TraceRayFn>(*slot);
+	g_watchFn = fn;
+	if (!PatchPointer(slot, reinterpret_cast<void*>(&Hooked_TraceRay))) return false;
+	g_watchSlot = slot;
+	return true;
+}
+
+#ifdef _WIN32
+void UnwatchTraces()
+{
+	if (g_watchSlot) PatchPointer(g_watchSlot, reinterpret_cast<void*>(g_watchOrig));
+	g_watchSlot = nullptr;
+}
+#endif
+
+int EntityIndex(void* ent)
+{
+	uint32_t h;
+	if (!ent || !EntityHandle(ent, &h) || h == kInvalidEHandle) return -1;
+	return (int)(h & kEntEntryMask);
+}
+
+}

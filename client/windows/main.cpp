@@ -17,6 +17,7 @@
 #include "teleport_predict.h"
 #include "checkpoint_predict.h"
 #include "speedo.h"
+#include "jumpstats.h"
 #include "settings.h"
 #include "options_tab.h"
 #include "spectate.h"
@@ -257,6 +258,7 @@ void __fastcall Hooked_IN_SetSampleTime(void* thisptr, float frametime)
 	m_flMouseSampleTime = frametime;
 
 	oIn_SetSampleTime(thisptr, frametime);
+	js::OnFrame();
 }
 
 void __fastcall Hooked_CHostState_OnClientConnected(void* thisptr)
