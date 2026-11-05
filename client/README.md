@@ -22,6 +22,7 @@ Mouse and input
 * Mouse interpolation: each frame's raw mouse motion is spread over its ticks, like Momentum's `m_rawinput 2`. It sets `m_rawinput` to 1 (off: 0) after each level load and on every change, and starts on unless `m_rawinput` was 0.
 * Viewpunch remover: no punch from fall damage or rough landings, a client-side [SuppressViewpunch](https://github.com/xen-000/SuppressViewpunch). On by default.
 * Autohop prediction (BunnyhopAPE): Windows only, off by default.
+* High polling rate fix: Windows only, off by default. A 4-8 kHz mouse puts a message in the game's input queue every 125 us and the engine retrieves them one by one; this reads the raw input in one batch per frame and takes the cursor-move messages once per frame instead, the way Godot handles it. `bhoptools_pumpstats` prints what the input loop costs.
 
 Prediction
 * Triggers: trigger teleports, pushes, boosters and their outputs, including map VScript that only touches the activator's velocity, origin and gravity. Anything a script does outside that is left to the server.
@@ -53,12 +54,12 @@ Downloads
 * When your map is missing or differs from the server's, the server's copy is fetched from fastdl.me. Map names with extra dots (`bhop_x.v2.bsp`) are allowed through.
 
 Options tab
-* `bhoptools` replaces the Multiplayer tab in Options: rawinput2 (mouse interpolation), prediction and clientside hud fixes (predicted speed, the local key overlay and bgs-jumpstats' HUD together). Everything is saved in `settings.cfg` (`rawinput`, `predict`, `viewpunch`, `fastdl`, `speedo`, `hudkeys`, `jsframe`, `chatglyphs`); the fastdl.me map fix is only switched there, the chat glyph fallback with `chat_glyphs`.
+* `bhoptools` replaces the Multiplayer tab in Options: rawinput2 (mouse interpolation), prediction and clientside hud fixes (predicted speed, the local key overlay and bgs-jumpstats' HUD together). Everything is saved in `settings.cfg` (`rawinput`, `predict`, `viewpunch`, `fastdl`, `speedo`, `hudkeys`, `jsframe`, `chatglyphs`, `pollfix`); the fastdl.me map fix is only switched there, the chat glyph fallback with `chat_glyphs`.
 
 Hotkeys and console commands
 * `F5`: BunnyhopAPE autohop prediction (Windows only, not saved).
 * `F8`: prediction, saved.
-* `bhoptools_predict 0/1`, `hud_speed 0/1`, `hud_keys 0/1`, `bhoptools_viewpunch 0/1` (the viewpunch remover, on by default), and on Linux `chat_glyphs 0/1`. With no argument they print the current state. All saved.
+* `bhoptools_predict 0/1`, `hud_speed 0/1`, `hud_keys 0/1`, `bhoptools_viewpunch 0/1` (the viewpunch remover, on by default), on Windows `bhoptools_pollfix 0/1` (the high polling rate fix) and `bhoptools_pumpstats` (prints and resets the input loop counters), and on Linux `chat_glyphs 0/1`. With no argument they print the current state. All saved.
 * `bhoptools_log` starts or stops writing debug info to `cstrike/bhoptools_log.txt`: what's predicted and what isn't, every correction from the server and its likely cause, and every `[bhoptools]` console message while it's on. Send that file with a bug report.
 * Hidden (left out of `find` and autocomplete): the server plugin's protocol commands (`bhoptools_caps`, `bhoptools_ack`, `bhoptools_chat`, `bhoptools_menu`, `bhoptools_ask`, `bhoptools_rngcvars`, `bhoptools_autobhop`, `bhoptools_noclip`, `bhoptools_move`, `bhoptools_lfskip`, `bhoptools_msf`, `bhoptools_cpset`, `bhoptools_keys`, `bhoptools_autosync`, `bhoptools_ents`, `bhoptools_player`, `bhoptools_sync`, `bhoptools_restart`, `bhoptools_frames`), the shavit command names listed above, and `say`/`say_team` when the game doesn't have its own. The shavit names and protocol commands can also be run by the server.
 
